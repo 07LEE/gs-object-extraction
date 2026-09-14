@@ -31,6 +31,8 @@ gs-object-extraction-gui path/to/point_cloud.ply
 
 Left drag orbits, right or middle drag pans, the wheel zooms and a double-click sets the rotation centre. The up axis is estimated from the floor (Auto) and can be set to one of the six axes in the Scene panel.
 
+Press S to mark the object: a left click adds an object point, a right click a background point, and SAM2 draws the mask on the current view. Enter adds the view to the list, Backspace undoes the last point and Esc clears them. Moving the view drops points that were not added. Mark the object from several directions.
+
 ### Extract one object
 
 ```bash
@@ -48,6 +50,7 @@ DATA holds the dataset scenes (360-USID/scene_name) and the trained models (gs/s
 ## 3. Core Features
 
 - Desktop Viewer: Open a Gaussian PLY and orbit, pan and zoom with GPU rendering; the view starts upright near the scene centre
+- Click-to-mask: SAM2 turns object and background clicks on the rendered view into a mask; added views are kept for extraction
 - Mask Lifting: Lift per-view object masks to Gaussians by their rendered contribution and keep the Gaussians drawn mostly inside the masks
 - Off-mask Pruning: Render the selection on its own and remove Gaussians drawn mostly outside the masks, such as floor pieces hidden in the full scene
 - Source-photo Free: Reads the trained PLY, camera poses and masks only
