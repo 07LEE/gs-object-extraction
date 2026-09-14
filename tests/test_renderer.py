@@ -1,0 +1,55 @@
+import os
+import numpy as np
+import pytest
+from gscutter.camera import Camera
+from gscutter.renderer import projection_matrix
+from gscutter.scene import GaussianScene
+
+cuda = pytest.mark.skipif(os.environ.get("GSCUTTER_TEST_CUDA") != "1", reason="set GSCUTTER_TEST_CUDA=1 in the GPU environment")
+
+
+def test_projection_maps_arbitrary_intrinsics_to_pixel_coordinates():
+    camera = Camera(60, 40, 45, 42, 22.2, 25.3, np.eye(4))
+    xyz = np.array([[.2, .3, 2, 1], [-.6, -.1, 3, 1]])
+    clip = xyz @ projection_matrix(camera).T
+    uv = ((clip[:, :2] / clip[:, 3:4] + 1) * [camera.width, camera.height] - 1) / 2
+    np.testing.assert_allclose(uv, xyz[:, :2] / xyz[:, 2:3] * [camera.fx, camera.fy] + [camera.cx, camera.cy], atol=2e-6)
+
+
+def three_gaussians():
+    from gscutter.renderer import GraphdecoRenderer
+    scene = GaussianScene.from_colors(np.array([[0, 0, 2.], [.05, .02, 2.6], [.4, 0, 3.]]),
+                                      np.full((3, 3), .16), np.array([[.9, .1, .1], [.1, .8, .1], [.1, .1, .8]]),
+                                      np.array([.9, .85, .8]))
+    return GraphdecoRenderer(scene), Camera.look_at((0, 0, 0), (0, 0, 2), width=24, height=24)
+
+
+@cuda
+def test_lift_matches_a_per_gaussian_basis_render():
+    renderer, camera = three_gaussians()
+    labels = np.full((24, 24), -1, dtype=np.int8)
+    labels[8:14, 8:14] = 1
+    labels[14:19, 10:17] = 0
+    lifted = renderer.lift(camera, labels)
+    basis = renderer.render_features(camera, np.eye(3))  # each channel tags one Gaussian
+    np.testing.assert_allclose(lifted.inside, basis[labels == 1].sum(axis=0), rtol=2e-5, atol=2e-5)
+    np.testing.assert_allclose(lifted.outside, basis[labels == 0].sum(axis=0), rtol=2e-5, atol=2e-5)
+    np.testing.assert_allclose(lifted.total, basis.sum(axis=(0, 1)), rtol=2e-5, atol=2e-5)
+    np.testing.assert_allclose(renderer.render(camera).alpha, basis.sum(axis=2), rtol=2e-5, atol=2e-5)
+    for tensor in (renderer.means, renderer.scales, renderer.rotations, renderer.opacities, renderer.sh):
+        assert not tensor.requires_grad and tensor.grad is None
+
+
+@cuda
+def test_lift_with_active_renders_the_selection_on_its_own():
+    renderer, camera = three_gaussians()
+    labels = np.zeros((24, 24), dtype=np.int8)
+    labels[8:14, 8:14] = 1
+    active = np.array([False, True, True])  # the front Gaussian is left out, so the one behind shows through
+    lifted = renderer.lift(camera, labels, active=active)
+    basis = renderer.render_features(camera, np.eye(3), active=active)
+    np.testing.assert_allclose(lifted.inside, basis[labels == 1].sum(axis=0), rtol=2e-5, atol=2e-5)
+    np.testing.assert_allclose(lifted.outside, basis[labels == 0].sum(axis=0), rtol=2e-5, atol=2e-5)
+    assert lifted.total[0] == 0 and lifted.inside[1] > renderer.lift(camera, labels).inside[1]
+    everyone = renderer.lift(camera, labels, active=np.ones(3, bool))
+    np.testing.assert_allclose(everyone.inside, renderer.lift(camera, labels).inside, rtol=1e-6, atol=1e-7)
