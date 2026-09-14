@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gscutter"
+version = "0.1.0"
+description = "Cut clean standalone objects out of trained 3D Gaussian Splatting scenes"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+images = ["Pillow>=9"]
+
+[project.scripts]
+gscutter = "gscutter.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["gscutter*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
