@@ -14,11 +14,13 @@ from .renderer import Lifted
 THRESHOLD, MIN_SUPPORT, ROUNDS, BAND = .65, .05, 2, 2
 
 
-def lift_masks(renderer, views, *, band=0, active=None):
-    """Contributions summed over ``(camera, mask)`` views."""
+def lift_masks(renderer, views, *, band=0, active=None, on_view=None):
+    """Contributions summed over views, calling ``on_view()`` after each lift."""
     lifted = Lifted.zeros(renderer.n)
     for camera, mask in views:
         lifted += renderer.lift(camera, band_labels(mask, band), active=active)
+        if on_view is not None:
+            on_view()
     return lifted
 
 
@@ -36,12 +38,32 @@ def prune_off_mask(selected, inside, outside, threshold=.5):
     return selected & ~(off > threshold)
 
 
-def extract(renderer, views, *, threshold=THRESHOLD, min_support=MIN_SUPPORT, rounds=ROUNDS, band=BAND):
-    """``{"selected": mask-lifted selection, "cleaned": after pruning}`` as boolean arrays over the scene."""
-    selected = select(lift_masks(renderer, views), threshold, min_support)
+def extract(renderer, views, *, threshold=THRESHOLD, min_support=MIN_SUPPORT, rounds=ROUNDS, band=BAND,
+            progress=None):
+    """Return ``selected`` and ``cleaned`` boolean arrays over the scene.
+
+    ``progress(stage, done, total)`` runs after every lifted view; raising from
+    it stops extraction. Views are retained so iterators work for every round.
+    """
+    views = tuple(views)
+    if not views:
+        raise ValueError("extraction requires at least one masked view")
+    if rounds < 0:
+        raise ValueError("cleaning rounds must be nonnegative")
+    done, total = 0, len(views) * (rounds + 1)
+    stage = "Selecting object"
+
+    def report_view():
+        nonlocal done
+        done += 1
+        if progress is not None:
+            progress(stage, done, total)
+
+    selected = select(lift_masks(renderer, views, on_view=report_view), threshold, min_support)
     stages = {"selected": selected}
-    for _ in range(rounds):
-        own = lift_masks(renderer, views, band=band, active=selected)
+    for round_index in range(rounds):
+        stage = f"Cleaning {round_index + 1}/{rounds}"
+        own = lift_masks(renderer, views, band=band, active=selected, on_view=report_view)
         selected = prune_off_mask(selected, own.inside, own.outside)
     stages["cleaned"] = selected
     return stages

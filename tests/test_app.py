@@ -25,7 +25,7 @@ def app():
 def test_window_starts_empty_with_open_and_quit(app):
     window = MainWindow()
     assert window.windowTitle() == TITLE
-    assert [a.text() for a in window.file_menu.actions()] == ["&Open PLY...", "&Quit"]
+    assert [a.text() for a in window.file_menu.actions()] == ["&Open PLY...", "&Export object PLY...", "&Quit"]
     assert window.viewport.renderer is None and window.up_box.currentText() == "Auto"
 
 

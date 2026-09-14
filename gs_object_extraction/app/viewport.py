@@ -31,6 +31,9 @@ class Viewport(QWidget):
         self.setMinimumSize(320, 240)
         self.setFocusPolicy(Qt.StrongFocus)
         self.renderer = None
+        self.active = None  # None for the scene, boolean selection for object preview
+        self.background = BACKGROUND
+        self.suspended = False
         self.orbit = None
         self.segmenter = None
         self.selecting = False
@@ -49,29 +52,54 @@ class Viewport(QWidget):
 
     def set_scene(self, renderer, orbit):
         self.renderer, self.orbit = renderer, orbit
+        self.active, self.background = None, BACKGROUND
         self.view_changed()
 
     def clear(self):
+        self._timer.stop()
         self.renderer = self.orbit = self.image = self.pixels = self.camera = None
+        self.active, self.background = None, BACKGROUND
         self.clear_prompts()
+
+    def set_preview(self, active=None, background=BACKGROUND):
+        """Render and pick only the selection while keeping the current camera."""
+        if active is not None:
+            active = np.asarray(active)
+            if self.renderer is None or active.shape != (self.renderer.n,) or active.dtype != np.bool_:
+                raise ValueError("preview selection must be a boolean array of shape N")
+            self.set_selecting(False)
+        self.active, self.background = active, background
+        self.view_changed()
+
+    def set_suspended(self, on):
+        """Give extraction exclusive use of the renderer until its thread finishes."""
+        self.suspended = bool(on)
+        self._press, self._dragging = None, False
+        self.setEnabled(not on)
+        if on:
+            self._timer.stop()
+        else:
+            self.request()
 
     def request(self):
         """Render on the next event-loop turn; repeated requests collapse into one frame."""
-        self._timer.start()
+        if not self.suspended:
+            self._timer.start()
 
     def view_changed(self):
         """The camera or the widget size changed: prompts on the old frame no longer apply."""
+        self.pixels = self.camera = None
         self.clear_prompts()
         self.request()
 
     def render_now(self):
-        if self.renderer is None or self.orbit is None:
+        if self.suspended or self.renderer is None or self.orbit is None:
             return
         ratio = self.devicePixelRatioF()
         width, height = max(int(self.width() * ratio), 1), max(int(self.height() * ratio), 1)
         start = time.perf_counter()
         self.camera = self.orbit.camera(width, height)
-        self.pixels = self.renderer.render_image(self.camera, background=BACKGROUND)
+        self.pixels = self.renderer.render_image(self.camera, active=self.active, background=self.background)
         self.image = QImage(self.pixels.data, width, height, 3 * width, QImage.Format_RGB888).copy()
         self.frame += 1
         self.clear_prompts()
@@ -80,9 +108,9 @@ class Viewport(QWidget):
 
     def pick(self, x, y):
         """World point under widget position (x, y), or None where nothing solid is drawn."""
-        if self.renderer is None or self.camera is None:
+        if self.suspended or self.renderer is None or self.camera is None:
             return None
-        depth, alpha = self.renderer.depth_image(self.camera)
+        depth, alpha = self.renderer.depth_image(self.camera, active=self.active)
         px, py = self._to_pixels(x, y)
         if alpha[py, px] < MIN_PICK_ALPHA:
             return None
@@ -96,7 +124,7 @@ class Viewport(QWidget):
 
     def add_point(self, x, y, label):
         """Add a prompt at widget position (x, y) and update the mask."""
-        if self.pixels is None or self.camera is None or self.segmenter is None:
+        if self.suspended or self.active is not None or self.pixels is None or self.camera is None or self.segmenter is None:
             return
         self.points.append(self._to_pixels(x, y))
         self.labels.append(int(label))
@@ -136,14 +164,14 @@ class Viewport(QWidget):
         self.prompts_changed.emit()
 
     def set_selecting(self, on):
-        self.selecting = bool(on)
+        self.selecting = bool(on) and self.active is None and not self.suspended
         self.setCursor(Qt.CrossCursor if self.selecting else Qt.ArrowCursor)
 
     # Qt events
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor.fromRgbF(*BACKGROUND))
+        painter.fillRect(self.rect(), QColor.fromRgbF(*self.background))
         if self.image is None:
             painter.setPen(QColor(170, 170, 170))
             painter.drawText(self.rect(), Qt.AlignCenter, "Open a Gaussian PLY file (Ctrl+O)")

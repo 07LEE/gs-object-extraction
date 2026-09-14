@@ -33,7 +33,15 @@ Left drag orbits, right or middle drag pans, the wheel zooms and a double-click 
 
 Press S to mark the object: a left click adds an object point, a right click a background point, and SAM2 draws the mask on the current view. Enter adds the view to the list, Backspace undoes the last point and Esc clears them. Moving the view drops points that were not added. Mark the object from several directions.
 
-### Extract one object
+### Extract and export in the viewer
+
+After adding views, click Extract object (Ctrl+E). The tool selects Gaussians from the confirmed masks, then renders the selection on its own to remove pieces outside the masks. Progress is shown while it runs; Cancel extraction stops after the current view finishes.
+
+The preview switches to Object only when extraction finishes. Orbit and zoom to inspect it, use Reset view to fit the object, and choose White or Black under Object background. Choose Scene to return to marking views. Adding or removing a confirmed view clears the previous result; extract again after making changes.
+
+Click Export object PLY (Ctrl+Shift+S) to save the cleaned object. The PLY retains its Gaussian parameters, spherical harmonic coefficients, IDs and extra attributes. Choose a different file from the source scene.
+
+### Extract one 360-USID object from dataset masks
 
 ```bash
 gs-object-extraction extract --scene-dir DATA/360-USID/cone --model-dir DATA/gs/cone --output outputs/cone
