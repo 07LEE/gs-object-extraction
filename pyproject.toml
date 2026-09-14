@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "gscutter"
+name = "gs-object-extraction"
 version = "0.1.0"
 description = "Cut clean standalone objects out of trained 3D Gaussian Splatting scenes"
 requires-python = ">=3.10"
@@ -14,10 +14,10 @@ dev = ["pytest>=7"]
 images = ["Pillow>=9"]
 
 [project.scripts]
-gscutter = "gscutter.cli:main"
+gs-object-extraction = "gs_object_extraction.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["gscutter*"]
+include = ["gs_object_extraction*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

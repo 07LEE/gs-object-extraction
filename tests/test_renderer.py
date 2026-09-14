@@ -1,11 +1,11 @@
 import os
 import numpy as np
 import pytest
-from gscutter.camera import Camera
-from gscutter.renderer import projection_matrix
-from gscutter.scene import GaussianScene
+from gs_object_extraction.camera import Camera
+from gs_object_extraction.renderer import projection_matrix
+from gs_object_extraction.scene import GaussianScene
 
-cuda = pytest.mark.skipif(os.environ.get("GSCUTTER_TEST_CUDA") != "1", reason="set GSCUTTER_TEST_CUDA=1 in the GPU environment")
+cuda = pytest.mark.skipif(os.environ.get("GS_OBJECT_EXTRACTION_TEST_CUDA") != "1", reason="set GS_OBJECT_EXTRACTION_TEST_CUDA=1 in the GPU environment")
 
 
 def test_projection_maps_arbitrary_intrinsics_to_pixel_coordinates():
@@ -17,7 +17,7 @@ def test_projection_maps_arbitrary_intrinsics_to_pixel_coordinates():
 
 
 def three_gaussians():
-    from gscutter.renderer import GraphdecoRenderer
+    from gs_object_extraction.renderer import GraphdecoRenderer
     scene = GaussianScene.from_colors(np.array([[0, 0, 2.], [.05, .02, 2.6], [.4, 0, 3.]]),
                                       np.full((3, 3), .16), np.array([[.9, .1, .1], [.1, .8, .1], [.1, .1, .8]]),
                                       np.array([.9, .85, .8]))

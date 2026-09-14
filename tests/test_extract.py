@@ -1,8 +1,8 @@
 from types import SimpleNamespace
 import numpy as np
-from gscutter.extract import extract, prune_off_mask, score, select
-from gscutter.masks import band_labels
-from gscutter.renderer import Lifted
+from gs_object_extraction.extract import extract, prune_off_mask, score, select
+from gs_object_extraction.masks import band_labels
+from gs_object_extraction.renderer import Lifted
 
 # A 1 x 6 image; the object mask covers pixels 2-4.
 MASK = np.array([[0, 0, 1, 1, 1, 0]], bool)

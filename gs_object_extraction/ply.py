@@ -247,7 +247,7 @@ def save_ply(scene: GaussianScene, path) -> None:
         if vertices[name].dtype.kind == "f" and not np.all(np.isfinite(vertices[name])):
             raise ValueError(f"property {name!r} is outside its PLY storage range")
     header = ["ply", "format binary_little_endian 1.0",
-              "comment gscutter Gaussian scene; quaternion order wxyz",
+              "comment gs-object-extraction Gaussian scene; quaternion order wxyz",
               f"element vertex {len(scene)}"]
     header.extend(f"property {type_name} {name}" for name, type_name, _ in properties)
     header.append("end_header")

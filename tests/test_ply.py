@@ -1,8 +1,8 @@
 import numpy as np
 import pytest
 
-from gscutter.ply import load_ply, save_ply
-from gscutter.scene import GaussianScene
+from gs_object_extraction.ply import load_ply, save_ply
+from gs_object_extraction.scene import GaussianScene
 
 
 def make_scene(sh_count=16):

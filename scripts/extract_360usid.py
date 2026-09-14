@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Run ``gscutter extract`` on every 360-USID scene with a trained model and build a contact sheet.
+"""Run ``gs-object-extraction extract`` on every 360-USID scene with a trained model and build a contact sheet.
 
-    .venv-gpu/bin/python scripts/extract_360usid.py --data-root ../data/360usid --output outputs/360usid
+    python scripts/extract_360usid.py --data-root DATA --output outputs/360usid
 
 ``--data-root`` holds ``360-USID/<scene>`` (dataset) and ``gs/<scene>`` (Graphdeco models).
 """
@@ -13,7 +13,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from gscutter.cli import extract_scene
+from gs_object_extraction.cli import extract_scene
 
 
 def contact_sheet(paths, out, width=1200):

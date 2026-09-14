@@ -1,6 +1,6 @@
-"""gscutter command line.
+"""gs-object-extraction command line.
 
-    python -m gscutter extract --scene-dir DATA/360-USID/cone --model-dir DATA/gs/cone --output out/cone
+    gs-object-extraction extract --scene-dir DATA/360-USID/cone --model-dir DATA/gs/cone --output out/cone
 
 The scene folder uses the 360-USID layout (COLMAP ``sparse/0``, ``images/``,
 ``object_masks/``); the model folder is a Graphdeco training output. Masks of
@@ -68,7 +68,7 @@ def extract_scene(scene_dir, model_dir, output, **options):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(prog="gscutter", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(prog="gs-object-extraction", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
     p = sub.add_parser("extract", help="cut a clean object out of a trained 3DGS")
     p.add_argument("--scene-dir", type=Path, required=True)

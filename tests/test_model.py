@@ -1,6 +1,6 @@
 import json
 import pytest
-from gscutter.model import point_cloud, training_roles
+from gs_object_extraction.model import point_cloud, training_roles
 
 
 def model(tmp_path, names, eval_flag="True"):

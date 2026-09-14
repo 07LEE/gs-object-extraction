@@ -1,7 +1,7 @@
-"""COLMAP binary sparse-model reader and conversion to gscutter cameras.
+"""COLMAP binary sparse-model reader and conversion to Camera objects.
 
 Only undistorted pinhole models are supported. COLMAP places the upper-left
-pixel centre at (0.5, 0.5); gscutter and Graphdeco place it at (0, 0), so the
+pixel centre at (0.5, 0.5); this package and Graphdeco place it at (0, 0), so the
 principal point moves by half a pixel after any resize to the render size.
 Graphdeco training ignores the principal point and assumes the image centre;
 ``principal_point_offset`` exposes how far a camera is from that assumption.

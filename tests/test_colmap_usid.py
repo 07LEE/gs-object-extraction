@@ -1,7 +1,7 @@
 import struct
 import numpy as np
 import pytest
-from gscutter.colmap import (ColmapCamera, ColmapImage, camera_from_colmap, qvec_to_rotation,
+from gs_object_extraction.colmap import (ColmapCamera, ColmapImage, camera_from_colmap, qvec_to_rotation,
                             read_cameras_binary, read_images_binary)
 
 
@@ -63,7 +63,7 @@ def test_resized_camera_matches_colmap_projection_with_half_pixel_shift():
 
 def test_usid_scene_indexes_views_masks_and_holdout(tmp_path):
     Image = pytest.importorskip("PIL.Image")
-    from gscutter.usid import UsidScene, load_mask
+    from gs_object_extraction.usid import UsidScene, load_mask
     root = tmp_path / "scene"
     for folder in ("images", "object_masks", "unseen_masks", "test_images", "test_object_masks", "sparse/0"):
         (root / folder).mkdir(parents=True)
