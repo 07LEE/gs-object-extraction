@@ -1,16 +1,42 @@
 """Orbit camera for the viewer: yaw and pitch around a target, pan in the view plane, zoom by distance.
 
-A Gaussian PLY carries no up direction, so ``up`` is one of the six world axes
-and can be switched in the viewer. COLMAP-based scenes usually have world -Y up.
+A Gaussian PLY carries no up direction. ``estimate_up`` takes the normal of the
+dominant plane near the scene centre (usually the floor) and points it toward
+the side with more content; the viewer can also force one of the six axes.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import numpy as np
 from ..camera import Camera
 
 AXES = {"+X": (1., 0., 0.), "-X": (-1., 0., 0.), "+Y": (0., 1., 0.),
         "-Y": (0., -1., 0.), "+Z": (0., 0., 1.), "-Z": (0., 0., -1.)}
+DEFAULT_UP = AXES["-Y"]  # camera up in COLMAP's first view, the usual fallback
 PITCH_LIMIT = np.deg2rad(89.)
+PLANE_RATIO = .2  # least/middle variance below this counts as a clear plane
+
+
+def estimate_up(means):
+    """Unit up vector: normal of the dominant plane among the central half of the Gaussians.
+
+    The floor is a thin sheet with walls, plants and the object standing on it,
+    so the long tail of heights marks the up side. Without a clear plane the
+    COLMAP-style -Y is returned.
+    """
+    means = np.asarray(means, dtype=float)
+    centre = np.median(means, axis=0)
+    radius = np.linalg.norm(means - centre, axis=1)
+    near = means[radius <= np.median(radius)]
+    if len(near) < 10:
+        return np.array(DEFAULT_UP)
+    offsets = near - near.mean(axis=0)
+    values, vectors = np.linalg.eigh(offsets.T @ offsets / len(near))
+    if values[1] <= 0 or values[0] / values[1] > PLANE_RATIO:
+        return np.array(DEFAULT_UP)
+    normal = vectors[:, 0]
+    heights = offsets @ normal
+    skew = np.mean(heights ** 3)
+    return normal if skew >= 0 else -normal
 
 
 @dataclass
@@ -19,18 +45,27 @@ class Orbit:
     distance: float
     yaw: float = 0.
     pitch: float = np.deg2rad(20.)
-    up: str = "-Y"
+    up: np.ndarray = field(default_factory=lambda: np.array(DEFAULT_UP))
     fov_y: float = 50.
 
+    def __post_init__(self):
+        self.target = np.asarray(self.target, dtype=float)
+        self.up = _unit(self.up)
+
     @classmethod
-    def framing(cls, means, up="-Y", fov_y=50.):
-        """Look at the middle of the 1-99 percentile box so far floaters do not shrink the scene."""
-        lo, hi = np.percentile(np.asarray(means, dtype=float), [1, 99], axis=0)
-        radius = max(float(np.linalg.norm(hi - lo)) / 2, 1e-6)
-        return cls((lo + hi) / 2, radius / np.tan(np.deg2rad(fov_y) / 2) * 1.1, up=up, fov_y=fov_y)
+    def framing(cls, means, up=DEFAULT_UP, fov_y=50.):
+        """Start inside the scene looking at the median Gaussian, where a 360 capture keeps its subject.
+
+        The distance is 0.6 x the median distance of the Gaussians from that point,
+        so the surrounding background neither hides the subject nor slows the view.
+        """
+        means = np.asarray(means, dtype=float)
+        centre = np.median(means, axis=0)
+        spread = float(np.median(np.linalg.norm(means - centre, axis=1)))
+        return cls(centre, max(.6 * spread, 1e-6), up=up, fov_y=fov_y)
 
     def _basis(self):
-        u = np.asarray(AXES[self.up])
+        u = self.up
         ref = np.array([1., 0., 0.]) if abs(u[0]) < .9 else np.array([0., 0., 1.])
         e1 = np.cross(u, ref)
         e1 /= np.linalg.norm(e1)
@@ -40,10 +75,10 @@ class Orbit:
     def eye(self):
         u, e1, e2 = self._basis()
         direction = np.cos(self.pitch) * (np.cos(self.yaw) * e1 + np.sin(self.yaw) * e2) + np.sin(self.pitch) * u
-        return np.asarray(self.target, dtype=float) + self.distance * direction
+        return self.target + self.distance * direction
 
     def camera(self, width, height):
-        return Camera.look_at(self.eye, self.target, int(width), int(height), self.fov_y, AXES[self.up],
+        return Camera.look_at(self.eye, self.target, int(width), int(height), self.fov_y, self.up,
                               near=max(self.distance * 1e-3, 1e-4))
 
     def rotate(self, dx, dy, speed=.005):
@@ -55,13 +90,39 @@ class Orbit:
         """Drag by (dx, dy) pixels: points at the target's depth follow the mouse exactly."""
         rows = self.camera(max(int(height), 1), max(int(height), 1)).world_to_camera[:3, :3]
         per_pixel = 2 * self.distance * np.tan(np.deg2rad(self.fov_y) / 2) / height
-        self.target = np.asarray(self.target, dtype=float) - (rows[0] * dx + rows[1] * dy) * per_pixel
+        self.target = self.target - (rows[0] * dx + rows[1] * dy) * per_pixel
 
     def zoom(self, steps, factor=.9):
         """Positive steps move closer."""
         self.distance = max(self.distance * factor ** steps, 1e-6)
 
-    def set_up(self, axis):
-        if axis not in AXES:
-            raise ValueError(f"up must be one of {', '.join(AXES)}")
-        self.up, self.yaw = axis, 0.
+    def look_from(self, eye, target):
+        """Put the orbit centre on ``target`` without moving the camera."""
+        u, e1, e2 = self._basis()
+        offset = np.asarray(eye, dtype=float) - np.asarray(target, dtype=float)
+        self.distance = max(float(np.linalg.norm(offset)), 1e-6)
+        d = offset / self.distance
+        self.target = np.asarray(target, dtype=float)
+        self.pitch = float(np.clip(np.arcsin(np.clip(d @ u, -1, 1)), -PITCH_LIMIT, PITCH_LIMIT))
+        self.yaw = float(np.arctan2(d @ e2, d @ e1))
+
+    def set_up(self, up):
+        """New up vector, keeping the camera where it is."""
+        eye = self.eye
+        self.up = _unit(up)
+        self.look_from(eye, self.target)
+
+
+def _unit(vector):
+    v = np.asarray(vector, dtype=float)
+    norm = np.linalg.norm(v)
+    if v.shape != (3,) or not np.isfinite(norm) or norm < 1e-9:
+        raise ValueError("up must be a nonzero 3-vector")
+    return v / norm
+
+
+def unproject(camera, x, y, depth):
+    """World point seen at pixel (x, y) with camera-space depth ``depth``."""
+    local = np.array([(x - camera.cx) / camera.fx * depth, (y - camera.cy) / camera.fy * depth, depth])
+    rotation, translation = camera.world_to_camera[:3, :3], camera.world_to_camera[:3, 3]
+    return rotation.T @ (local - translation)

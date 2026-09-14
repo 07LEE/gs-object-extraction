@@ -121,6 +121,21 @@ class GraphdecoRenderer:
             alpha = self._rasterize(camera, features=self.torch.ones_like(self.means), active=active)[0][0].cpu().numpy()
         return Frame(rgb, alpha)
 
+    def render_image(self, camera, *, active=None, background=(0, 0, 0)):
+        """8-bit RGB (H x W x 3) for display, converted on the GPU."""
+        with self.torch.no_grad():
+            color = self._rasterize(camera, active=active, background=background)[0]
+            return (color.clamp(0, 1) * 255).round().to(self.torch.uint8).permute(1, 2, 0).contiguous().cpu().numpy()
+
+    def depth_image(self, camera, *, active=None):
+        """Camera-space depth (alpha-weighted mean over the drawn Gaussians) and alpha, both H x W."""
+        with self.torch.no_grad():
+            w2c = self._tensor(camera.world_to_camera)
+            z = self.means @ w2c[2, :3] + w2c[2, 3]
+            weighted = self._rasterize(camera, features=z[:, None].expand(-1, 3).contiguous(), active=active)[0][0]
+            alpha = self._rasterize(camera, features=self.torch.ones_like(self.means), active=active)[0][0]
+            return (weighted / alpha.clamp_min(1e-6)).cpu().numpy(), alpha.cpu().numpy()
+
     def lift(self, camera, labels, *, active=None):
         """Contributions to label-1, label-0 and all pixels; label -1 is ignored.
 

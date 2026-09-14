@@ -23,6 +23,14 @@ requirements.txt lists what is installed on top of the training environment (PyS
 
 ## 2. Quick Start
 
+### Open the viewer
+
+```bash
+gs-object-extraction-gui path/to/point_cloud.ply
+```
+
+Left drag orbits, right or middle drag pans, the wheel zooms and a double-click sets the rotation centre. The up axis is estimated from the floor (Auto) and can be set to one of the six axes in the Scene panel.
+
 ### Extract one object
 
 ```bash
@@ -39,6 +47,7 @@ DATA holds the dataset scenes (360-USID/scene_name) and the trained models (gs/s
 
 ## 3. Core Features
 
+- Desktop Viewer: Open a Gaussian PLY and orbit, pan and zoom with GPU rendering; the view starts upright near the scene centre
 - Mask Lifting: Lift per-view object masks to Gaussians by their rendered contribution and keep the Gaussians drawn mostly inside the masks
 - Off-mask Pruning: Render the selection on its own and remove Gaussians drawn mostly outside the masks, such as floor pieces hidden in the full scene
 - Source-photo Free: Reads the trained PLY, camera poses and masks only
