@@ -6,10 +6,21 @@ The model loads on first use. The image embedding is computed once per view
 
 import contextlib
 from pathlib import Path
+import re
 import numpy as np
 
-CONFIG = "configs/sam2.1/sam2.1_hiera_b+.yaml"
 DEFAULT_CHECKPOINT = Path(__file__).resolve().parents[2] / "checkpoints" / "sam2.1_hiera_base_plus.pt"
+_SIZES = {"tiny": "t", "small": "s", "base_plus": "b+", "large": "l"}
+
+
+def config_for(checkpoint):
+    """SAM2 model config matching a released checkpoint name, e.g. sam2.1_hiera_base_plus.pt."""
+    match = re.fullmatch(r"(sam2(?:\.1)?)_hiera_(tiny|small|base_plus|large)", Path(checkpoint).stem)
+    if match is None:
+        raise ValueError(f"cannot tell the SAM2 model from {Path(checkpoint).name}; use a released checkpoint "
+                         "name such as sam2.1_hiera_base_plus.pt (tiny, small, base_plus or large)")
+    family, size = match.groups()
+    return f"configs/{family}/{family}_hiera_{_SIZES[size]}.yaml"
 
 
 class Segmenter:
@@ -28,7 +39,7 @@ class Segmenter:
                 raise FileNotFoundError(f"SAM2 checkpoint not found: {self.checkpoint} (run scripts/setup_env.sh)")
             from sam2.build_sam import build_sam2
             from sam2.sam2_image_predictor import SAM2ImagePredictor
-            self._predictor = SAM2ImagePredictor(build_sam2(CONFIG, str(self.checkpoint), device="cuda"))
+            self._predictor = SAM2ImagePredictor(build_sam2(config_for(self.checkpoint), str(self.checkpoint), device="cuda"))
         return self._predictor
 
     @staticmethod

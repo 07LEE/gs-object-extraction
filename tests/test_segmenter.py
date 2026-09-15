@@ -75,3 +75,20 @@ def test_sam2_segments_a_rendered_blob_from_one_click():
     mask, score = Segmenter().predict(image, key=1, points=[(160, 120)], labels=[1])
     solid = alpha > .5
     assert score > .5 and (mask & solid).sum() / (mask | solid).sum() > .8
+
+
+@pytest.mark.parametrize("name, config", [
+    ("sam2.1_hiera_base_plus.pt", "configs/sam2.1/sam2.1_hiera_b+.yaml"),
+    ("sam2.1_hiera_tiny.pt", "configs/sam2.1/sam2.1_hiera_t.yaml"),
+    ("sam2_hiera_large.pt", "configs/sam2/sam2_hiera_l.yaml"),
+    ("/weights/sam2_hiera_small.pt", "configs/sam2/sam2_hiera_s.yaml"),
+])
+def test_config_follows_the_checkpoint_name(name, config):
+    from gs_object_extraction.app.segmenter import config_for
+    assert config_for(name) == config
+
+
+def test_unknown_checkpoint_name_is_refused():
+    from gs_object_extraction.app.segmenter import config_for
+    with pytest.raises(ValueError, match="base_plus"):
+        config_for("my_weights.pt")

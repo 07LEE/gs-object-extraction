@@ -6,7 +6,7 @@
 import argparse
 import sys
 from PySide6.QtWidgets import QApplication
-from .segmenter import DEFAULT_CHECKPOINT
+from .segmenter import DEFAULT_CHECKPOINT, config_for
 from .window import MainWindow
 
 
@@ -15,6 +15,10 @@ def main(argv=None):
     parser.add_argument("ply", nargs="?", help="Gaussian PLY file to open")
     parser.add_argument("--sam2-checkpoint", default=DEFAULT_CHECKPOINT, help="SAM2 checkpoint for click-to-mask")
     args = parser.parse_args(argv)
+    try:
+        config_for(args.sam2_checkpoint)
+    except ValueError as exc:
+        parser.error(str(exc))
     app = QApplication(sys.argv[:1])
     window = MainWindow(checkpoint=args.sam2_checkpoint)
     window.show()

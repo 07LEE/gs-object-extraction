@@ -210,3 +210,107 @@ def test_real_sam2_click_marks_the_rendered_blob(app, tmp_path):
     assert view.mask.mean() < .6  # the blob, not the whole frame
     window.add_view()
     assert len(window.views) == 1
+
+
+def test_undo_that_fails_in_sam2_keeps_the_points_that_match_the_mask(app, monkeypatch):
+    monkeypatch.setattr("gs_object_extraction.app.window.QMessageBox.warning", lambda *args: None)
+    fake = FakeSegmenter()
+    window, view = ready_window(fake)
+    window.select_action.trigger()
+    click(view, 100, 80, Qt.LeftButton)
+    click(view, 200, 150, Qt.LeftButton)
+    points, mask = list(view.points), view.mask.copy()
+    fake.fail = True
+    window.undo_action.trigger()
+    assert view.points == points and np.array_equal(view.mask, mask)
+    window.add_view()
+    assert window.views[0].points == tuple(points)
+
+
+def test_error_dialogs_do_not_show_a_wait_cursor(app, monkeypatch, tmp_path):
+    cursors = []
+    monkeypatch.setattr("gs_object_extraction.app.window.QMessageBox.warning",
+                        lambda *args: cursors.append(QApplication.overrideCursor()))
+    window, view = ready_window(FakeSegmenter(fail=True))
+    window.select_action.trigger()
+    click(view, 100, 80, Qt.LeftButton)
+    window.scene = GaussianScene.from_colors(np.zeros((1, 3)), np.full((1, 3), .1), np.ones((1, 3)), np.ones(1))
+    window.stages = {"selected": np.array([True]), "cleaned": np.array([True])}
+    assert window.export_ply(tmp_path / "object.txt") is False
+    assert cursors == [None, None] and QApplication.overrideCursor() is None
+
+
+def test_background_points_alone_make_no_mask_and_cannot_be_added(app):
+    fake = FakeSegmenter()
+    window, view = ready_window(fake)
+    window.select_action.trigger()
+    click(view, 100, 80, Qt.RightButton)
+    assert view.labels == [0] and view.mask is None and not fake.calls
+    assert "add an object point" in window.prompt_label.text() and not window.add_button.isEnabled()
+    window.add_view()
+    assert window.views == []
+    click(view, 200, 150, Qt.LeftButton)
+    assert view.mask is not None and window.add_button.isEnabled()
+
+
+def test_both_enter_keys_add_a_view(app):
+    from PySide6.QtGui import QKeySequence
+    shortcuts = MainWindow().add_view_action.shortcuts()
+    assert QKeySequence("Return") in shortcuts and QKeySequence("Enter") in shortcuts
+
+
+def test_sideways_wheel_does_not_drop_the_points(app):
+    from PySide6.QtCore import QPoint
+    from PySide6.QtGui import QWheelEvent
+    window, view = ready_window(FakeSegmenter())
+    window.select_action.trigger()
+    click(view, 100, 80, Qt.LeftButton)
+    distance = view.orbit.distance
+
+    def wheel(dx, dy):
+        view.wheelEvent(QWheelEvent(QPointF(100, 80), QPointF(100, 80), QPoint(0, 0), QPoint(dx, dy),
+                                    Qt.NoButton, Qt.NoModifier, Qt.NoScrollPhase, False))
+    wheel(120, 0)
+    assert view.points and view.orbit.distance == distance
+    wheel(0, 120)
+    assert view.points == [] and view.orbit.distance < distance
+
+
+class FlakyRenderer:
+    n = 10
+
+    def __init__(self):
+        self.fail = False
+
+    def render_image(self, camera, active=None, background=(0, 0, 0)):
+        if self.fail:
+            raise RuntimeError("CUDA out of memory")
+        return np.zeros((camera.height, camera.width, 3), np.uint8)
+
+
+def test_failed_render_is_shown_and_blocks_clicks_until_a_frame_renders(app):
+    fake = FakeSegmenter()
+    window, view = ready_window(fake)
+    renderer = FlakyRenderer()
+    view.set_scene(renderer, Orbit(np.zeros(3), 3.))
+    view.render_now()
+    renderer.fail = True
+    view.view_changed()
+    view.render_now()
+    assert view.image is None and view.camera is None and "out of memory" in view.render_error
+    assert "Render failed" in window.statusBar().currentMessage()
+    view.grab()  # paints the failure message
+    window.select_action.trigger()
+    click(view, 100, 80, Qt.LeftButton)
+    assert view.points == [] and not fake.calls
+    renderer.fail = False
+    view.render_now()
+    assert view.image is not None and view.render_error is None
+    click(view, 100, 80, Qt.LeftButton)
+    assert view.points and view.camera is not None
+
+
+def test_unknown_sam2_checkpoint_name_stops_the_viewer_at_start(app):
+    from gs_object_extraction.app.main import main
+    with pytest.raises(SystemExit):
+        main(["--sam2-checkpoint", "my_weights.pt"])

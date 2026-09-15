@@ -23,6 +23,7 @@ POINT_COLORS = {1: QColor(60, 220, 90), 0: QColor(235, 60, 60)}
 
 class Viewport(QWidget):
     rendered = Signal(float)  # milliseconds spent on the last frame
+    render_failed = Signal(str)
     prompts_changed = Signal()
     failed = Signal(str)
 
@@ -38,6 +39,7 @@ class Viewport(QWidget):
         self.segmenter = None
         self.selecting = False
         self.image = None
+        self.render_error = None  # message of the last failed render, shown instead of a stale frame
         self.pixels = None  # uint8 RGB of the frame on screen
         self.camera = None  # camera of the frame on screen
         self.frame = 0  # increments with every rendered frame; keys the SAM2 embedding
@@ -57,7 +59,7 @@ class Viewport(QWidget):
 
     def clear(self):
         self._timer.stop()
-        self.renderer = self.orbit = self.image = self.pixels = self.camera = None
+        self.renderer = self.orbit = self.image = self.pixels = self.camera = self.render_error = None
         self.active, self.background = None, BACKGROUND
         self.clear_prompts()
 
@@ -98,8 +100,16 @@ class Viewport(QWidget):
         ratio = self.devicePixelRatioF()
         width, height = max(int(self.width() * ratio), 1), max(int(self.height() * ratio), 1)
         start = time.perf_counter()
-        self.camera = self.orbit.camera(width, height)
-        self.pixels = self.renderer.render_image(self.camera, active=self.active, background=self.background)
+        camera = self.orbit.camera(width, height)
+        try:
+            pixels = self.renderer.render_image(camera, active=self.active, background=self.background)
+        except Exception as exc:  # e.g. CUDA out of memory: show why instead of a stale frame
+            self.image = self.pixels = self.camera = None
+            self.render_error = str(exc)
+            self.clear_prompts()
+            self.render_failed.emit(self.render_error)
+            return
+        self.camera, self.pixels, self.render_error = camera, pixels, None
         self.image = QImage(self.pixels.data, width, height, 3 * width, QImage.Format_RGB888).copy()
         self.frame += 1
         self.clear_prompts()
@@ -128,13 +138,23 @@ class Viewport(QWidget):
             return
         self.points.append(self._to_pixels(x, y))
         self.labels.append(int(label))
-        self._segment()
-
-    def undo_point(self):
-        if self.points:
+        if not self._segment():
             self.points.pop()
             self.labels.pop()
-            self._segment()
+            self.update()
+            self.prompts_changed.emit()
+
+    def undo_point(self):
+        if not self.points:
+            return
+        point, label = self.points.pop(), self.labels.pop()
+        if not self.points:
+            self.clear_prompts()
+        elif not self._segment():
+            self.points.append(point)  # keep the prompts that match the mask on screen
+            self.labels.append(label)
+            self.update()
+            self.prompts_changed.emit()
 
     def clear_prompts(self):
         self.points, self.labels = [], []
@@ -143,25 +163,31 @@ class Viewport(QWidget):
         self.prompts_changed.emit()
 
     def _segment(self):
-        if not self.points:
-            self.clear_prompts()
-            return
+        """Mask for the current points; False when SAM2 fails, leaving points and mask for the caller to restore."""
+        if 1 not in self.labels:  # background points alone do not describe an object
+            self.mask = self.score = self._overlay = None
+            self.update()
+            self.prompts_changed.emit()
+            return True
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             mask, score = self.segmenter.predict(self.pixels, self.frame, self.points, self.labels)
         except Exception as exc:
-            self.points.pop()  # keep the prompts that still have a valid mask
-            self.labels.pop()
-            self.failed.emit(str(exc))
-            return
+            error = str(exc)
+        else:
+            error = None
         finally:
-            QApplication.restoreOverrideCursor()
+            QApplication.restoreOverrideCursor()  # before any dialog, so it does not show a wait cursor
+        if error is not None:
+            self.failed.emit(error)
+            return False
         self.mask, self.score = mask, score
         rgba = np.zeros((*mask.shape, 4), np.uint8)
         rgba[mask] = MASK_RGBA
         self._overlay = QImage(rgba.data, mask.shape[1], mask.shape[0], 4 * mask.shape[1], QImage.Format_RGBA8888).copy()
         self.update()
         self.prompts_changed.emit()
+        return True
 
     def set_selecting(self, on):
         self.selecting = bool(on) and self.active is None and not self.suspended
@@ -174,7 +200,8 @@ class Viewport(QWidget):
         painter.fillRect(self.rect(), QColor.fromRgbF(*self.background))
         if self.image is None:
             painter.setPen(QColor(170, 170, 170))
-            painter.drawText(self.rect(), Qt.AlignCenter, "Open a Gaussian PLY file (Ctrl+O)")
+            message = f"Render failed: {self.render_error}" if self.render_error else "Open a Gaussian PLY file (Ctrl+O)"
+            painter.drawText(self.rect(), Qt.AlignCenter | Qt.TextWordWrap, message)
             return
         painter.drawImage(self.rect(), self.image)
         if self._overlay is not None:
@@ -225,6 +252,7 @@ class Viewport(QWidget):
             self.view_changed()
 
     def wheelEvent(self, event):
-        if self.orbit is not None:
-            self.orbit.zoom(event.angleDelta().y() / 120)
+        steps = event.angleDelta().y() / 120
+        if self.orbit is not None and steps:  # sideways scrolling does not zoom, so the points stay
+            self.orbit.zoom(steps)
             self.view_changed()

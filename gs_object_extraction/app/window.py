@@ -38,6 +38,7 @@ class MainWindow(QMainWindow):
         self.viewport.segmenter = Segmenter(checkpoint)
         self.setCentralWidget(self.viewport)
         self.viewport.rendered.connect(lambda ms: self.statusBar().showMessage(f"Render {ms:.0f} ms"))
+        self.viewport.render_failed.connect(lambda message: self.statusBar().showMessage(f"Render failed: {message}"))
         self.viewport.prompts_changed.connect(self.update_prompt_state)
         self.viewport.failed.connect(lambda message: QMessageBox.warning(self, "Cannot make a mask", message))
 
@@ -72,7 +73,8 @@ class MainWindow(QMainWindow):
 
     def _action(self, text, shortcut, slot, checkable=False):
         action = QAction(text, self)
-        action.setShortcut(QKeySequence(shortcut))
+        shortcuts = shortcut if isinstance(shortcut, tuple) else (shortcut,)
+        action.setShortcuts([QKeySequence(s) for s in shortcuts])
         action.setCheckable(checkable)
         action.triggered.connect(slot)
         self.addAction(action)
@@ -82,7 +84,7 @@ class MainWindow(QMainWindow):
         self.open_action = self._action("&Open PLY...", QKeySequence.Open, self.choose_ply)
         self.quit_action = self._action("&Quit", QKeySequence.Quit, self.close)
         self.select_action = self._action("&Select mode", "S", self.set_selecting, checkable=True)
-        self.add_view_action = self._action("&Add view", "Return", self.add_view)
+        self.add_view_action = self._action("&Add view", ("Return", "Enter"), self.add_view)  # main and keypad Enter
         self.undo_action = self._action("&Undo point", "Backspace", self.viewport.undo_point)
         self.clear_action = self._action("&Clear points", "Esc", self.viewport.clear_prompts)
         self.extract_action = self._action("&Extract object", "Ctrl+E", self.start_extraction)
@@ -233,15 +235,18 @@ class MainWindow(QMainWindow):
             text = f"{objects} object / {len(view.labels) - objects} background points"
             if view.mask is not None:
                 text += f", mask {int(view.mask.sum()):,} px (score {view.score:.2f})"
+            elif not objects:
+                text += ", add an object point"
         self.prompt_label.setText(text)
-        ready = (self.extraction_job is None and view.active is None
+        ready = (self.extraction_job is None and view.active is None and 1 in view.labels
                  and view.mask is not None and bool(view.mask.any()))
         self.add_button.setEnabled(ready)
         self.add_view_action.setEnabled(ready)
 
     def add_view(self):
         view = self.viewport
-        if self.extraction_job is not None or view.active is not None or view.mask is None or not view.mask.any():
+        if (self.extraction_job is not None or view.active is not None or 1 not in view.labels
+                or view.mask is None or not view.mask.any()):
             return
         marked = MaskedView(view.camera, view.mask.copy(), tuple(view.points), tuple(view.labels))
         self.invalidate_result()
@@ -381,7 +386,7 @@ class MainWindow(QMainWindow):
         if self.extraction_job is not None or self.scene is None or self.stages is None or not self.stages["cleaned"].any():
             return False
         path = Path(path)
-        temporary = None
+        temporary = error = None
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             if path.suffix.lower() != ".ply":
@@ -394,12 +399,14 @@ class MainWindow(QMainWindow):
             save_ply(self.scene.subset(self.stages["cleaned"]), temporary)
             os.replace(temporary, path)
         except Exception as exc:
-            QMessageBox.warning(self, "Cannot export object", str(exc))
-            return False
+            error = str(exc)
         finally:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
-            QApplication.restoreOverrideCursor()
+            QApplication.restoreOverrideCursor()  # before the dialog, so it does not show a wait cursor
+        if error is not None:
+            QMessageBox.warning(self, "Cannot export object", error)
+            return False
         self.statusBar().showMessage(f"Saved {int(self.stages['cleaned'].sum()):,} Gaussians to {path}")
         return True
 
