@@ -56,8 +56,10 @@ def test_opened_scene_renders_and_drags_move_the_camera(app, tmp_path):
     assert window.open_ply(tmp_path / "blob.ply") and window.count_label.text() == "400"
     view = window.viewport
     view.render_now()
-    centre = view.image.pixelColor(view.image.width() // 2, view.image.height() // 2)
-    assert centre != QColor.fromRgbF(*BACKGROUND)
+    cx, cy = view.image.width() // 2, view.image.height() // 2
+    shown = view.image.pixelColor(cx, cy).getRgb()[:3]  # 8-bit values: QColor compares 16-bit channels
+    assert shown != tuple(round(c * 255) for c in BACKGROUND)
+    assert shown == tuple(int(v) for v in view.pixels[cy, cx])  # the frame on screen is the rendered one
 
     eye, target = view.orbit.eye.copy(), view.orbit.target.copy()
     for kind, x in ((QEvent.MouseButtonPress, 100), (QEvent.MouseMove, 160), (QEvent.MouseButtonRelease, 160)):
@@ -310,7 +312,128 @@ def test_failed_render_is_shown_and_blocks_clicks_until_a_frame_renders(app):
     assert view.points and view.camera is not None
 
 
-def test_unknown_sam2_checkpoint_name_stops_the_viewer_at_start(app):
+def test_unknown_sam2_checkpoint_name_stops_the_viewer_at_start(app, capsys):
     from gs_object_extraction.app.main import main
     with pytest.raises(SystemExit):
         main(["--sam2-checkpoint", "my_weights.pt"])
+    assert "cannot tell the SAM2 model" in capsys.readouterr().err
+
+
+def test_select_mode_drag_with_a_frame_drawn_before_release_adds_no_point(app):
+    fake = FakeSegmenter()
+    window, view = ready_window(fake)
+    view.set_scene(FlakyRenderer(), Orbit(np.zeros(3), 3.))
+    view.render_now()
+    window.select_action.trigger()
+    view.mousePressEvent(mouse(QEvent.MouseButtonPress, 100, 80, Qt.LeftButton))
+    view.mouseMoveEvent(mouse(QEvent.MouseMove, 160, 80, Qt.LeftButton))
+    view.render_now()  # the app draws the moved view while the button is still held
+    assert view.pixels is not None
+    view.mouseReleaseEvent(mouse(QEvent.MouseButtonRelease, 160, 80, Qt.LeftButton))
+    assert view.points == [] and not fake.calls
+
+
+def test_small_jitter_during_a_click_still_counts_as_a_click(app):
+    window, view = ready_window(FakeSegmenter())
+    window.select_action.trigger()
+    click(view, 100, 80, Qt.LeftButton)
+    eye = view.orbit.eye.copy()
+    view.mousePressEvent(mouse(QEvent.MouseButtonPress, 200, 150, Qt.RightButton))
+    view.mouseMoveEvent(mouse(QEvent.MouseMove, 202, 151, Qt.RightButton))
+    view.mouseReleaseEvent(mouse(QEvent.MouseButtonRelease, 202, 151, Qt.RightButton))
+    assert view.labels == [1, 0] and np.allclose(view.orbit.eye, eye)
+
+
+def test_clicks_and_picks_map_widget_points_to_device_pixels_on_hidpi(app):
+    from PySide6.QtGui import QImage
+    fake = FakeSegmenter()
+    window, view = ready_window(fake)
+    w, h = view.width(), view.height()
+    view.camera = view.orbit.camera(2 * w, 2 * h)  # a frame rendered at devicePixelRatio 2
+    view.pixels = np.zeros((2 * h, 2 * w, 3), np.uint8)
+    view.image = QImage(2 * w, 2 * h, QImage.Format_RGB888)
+    window.select_action.trigger()
+    click(view, 100, 80, Qt.LeftButton)
+    assert view.points == [(200, 160)] and view.mask[160, 200]
+    window.add_view()
+    assert window.views[0].mask.shape == (2 * h, 2 * w)
+
+    class OneSolidPixel:
+        def depth_image(self, camera, active=None):
+            alpha = np.zeros((camera.height, camera.width))
+            alpha[160, 200] = 1
+            return np.full(alpha.shape, 2.), alpha
+    view.renderer = OneSolidPixel()
+    assert view.pick(100, 80) is not None and view.pick(50, 40) is None
+
+
+class RecordingPredictor:
+    """Stands in for SAM2 and keeps every image it was asked to encode."""
+
+    def __init__(self):
+        self.images = []
+
+    def set_image(self, image):
+        self.images.append(np.array(image))
+
+    def predict(self, point_coords, point_labels, multimask_output):
+        count = 3 if multimask_output else 1
+        masks = np.zeros((count, *self.images[-1].shape[:2]), bool)
+        masks[:, :10, :10] = True
+        return masks, np.linspace(.5, .9, count), None
+
+
+class ShiftingRenderer:
+    """Each frame is a different grey, so a stale embedding is detectable."""
+    n = 10
+
+    def __init__(self):
+        self.frames = 0
+
+    def render_image(self, camera, active=None, background=(0, 0, 0)):
+        self.frames += 1
+        return np.full((camera.height, camera.width, 3), 10 * self.frames, np.uint8)
+
+
+def test_each_new_frame_gets_a_new_sam2_embedding(app):
+    from gs_object_extraction.app.segmenter import Segmenter
+    predictor = RecordingPredictor()
+    window, view = ready_window(Segmenter(predictor=predictor))
+    view.set_scene(ShiftingRenderer(), Orbit(np.zeros(3), 3.))
+    view.render_now()
+    window.select_action.trigger()
+    click(view, 100, 80, Qt.LeftButton)
+    click(view, 120, 90, Qt.LeftButton)
+    assert len(predictor.images) == 1  # more points on the same frame reuse the embedding
+    view.orbit.rotate(40, 0)
+    view.view_changed()
+    view.render_now()
+    click(view, 100, 80, Qt.LeftButton)
+    assert len(predictor.images) == 2 and np.array_equal(predictor.images[1], view.pixels)
+
+
+def test_sam2_checkpoint_option_reaches_the_window(app, monkeypatch):
+    import gs_object_extraction.app.main as main_module
+    made = {}
+
+    class FakeApp:
+        def __init__(self, argv):
+            pass
+
+        def exec(self):
+            return 0
+
+    class FakeWindow:
+        def __init__(self, checkpoint):
+            made["checkpoint"] = checkpoint
+
+        def show(self):
+            pass
+
+        def open_ply(self, path):
+            made["ply"] = path
+
+    monkeypatch.setattr(main_module, "QApplication", FakeApp)
+    monkeypatch.setattr(main_module, "MainWindow", FakeWindow)
+    assert main_module.main(["scene.ply", "--sam2-checkpoint", "/w/sam2.1_hiera_large.pt"]) == 0
+    assert made == {"checkpoint": "/w/sam2.1_hiera_large.pt", "ply": "scene.ply"}

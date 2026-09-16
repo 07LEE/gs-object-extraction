@@ -91,3 +91,35 @@ def test_usid_scene_indexes_views_masks_and_holdout(tmp_path):
     (root / "images" / "extra.jpg").write_bytes((root / "images" / train[0]).read_bytes())
     with pytest.raises(ValueError, match="without COLMAP poses"):
         UsidScene(root)
+
+
+def within(seconds, fn):
+    """Run fn in a thread so a reader that never returns fails the test instead of hanging it."""
+    import threading
+    outcome = {}
+
+    def run():
+        try:
+            outcome["value"] = fn()
+        except Exception as exc:
+            outcome["error"] = exc
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    thread.join(seconds)
+    assert not thread.is_alive(), "reader did not return"
+    return outcome
+
+
+@pytest.mark.parametrize("cut", ["name", "keypoint count"])
+def test_truncated_images_file_raises_instead_of_hanging(tmp_path, cut):
+    record = struct.pack("<Q", 1) + struct.pack("<i7di", 1, 1, 0, 0, 0, 0, 0, 0, 1)
+    record += b"00000.jp" if cut == "name" else b"00000.jpg\0" + b"\1\0\0"
+    (tmp_path / "images.bin").write_bytes(record)
+    outcome = within(5, lambda: read_images_binary(tmp_path / "images.bin"))
+    assert isinstance(outcome.get("error"), ValueError) and "truncated" in str(outcome["error"])
+
+
+def test_truncated_cameras_file_raises(tmp_path):
+    (tmp_path / "cameras.bin").write_bytes(struct.pack("<Q", 1) + struct.pack("<iiQQ", 1, 1, 64, 36) + b"\0" * 12)
+    with pytest.raises(ValueError, match="truncated"):
+        read_cameras_binary(tmp_path / "cameras.bin")

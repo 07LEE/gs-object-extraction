@@ -42,15 +42,22 @@ class ColmapImage:
     camera_id: int
 
 
+def _read(stream, size):
+    data = stream.read(size)
+    if len(data) != size:
+        raise ValueError(f"{Path(stream.name).name} is truncated")
+    return data
+
+
 def read_cameras_binary(path):
     cameras = {}
     with Path(path).open("rb") as f:
-        for _ in range(struct.unpack("<Q", f.read(8))[0]):
-            camera_id, model_id, width, height = struct.unpack("<iiQQ", f.read(24))
+        for _ in range(struct.unpack("<Q", _read(f, 8))[0]):
+            camera_id, model_id, width, height = struct.unpack("<iiQQ", _read(f, 24))
             if model_id not in _MODELS:
                 raise ValueError(f"COLMAP camera model id {model_id} is not an undistorted pinhole model")
             model, count = _MODELS[model_id]
-            cameras[camera_id] = ColmapCamera(camera_id, model, width, height, struct.unpack(f"<{count}d", f.read(8 * count)))
+            cameras[camera_id] = ColmapCamera(camera_id, model, width, height, struct.unpack(f"<{count}d", _read(f, 8 * count)))
     return cameras
 
 
@@ -58,12 +65,12 @@ def read_images_binary(path):
     """Registered images keyed by file name; 2D keypoints are skipped."""
     images = {}
     with Path(path).open("rb") as f:
-        for _ in range(struct.unpack("<Q", f.read(8))[0]):
-            image_id, *pose, camera_id = struct.unpack("<i7di", f.read(64))
+        for _ in range(struct.unpack("<Q", _read(f, 8))[0]):
+            image_id, *pose, camera_id = struct.unpack("<i7di", _read(f, 64))
             name = bytearray()
-            while (byte := f.read(1)) != b"\0":
+            while (byte := _read(f, 1)) != b"\0":
                 name += byte
-            f.seek(24 * struct.unpack("<Q", f.read(8))[0], 1)
+            f.seek(24 * struct.unpack("<Q", _read(f, 8))[0], 1)
             image = ColmapImage(image_id, name.decode(), tuple(pose[:4]), tuple(pose[4:]), camera_id)
             images[image.name] = image
     return images

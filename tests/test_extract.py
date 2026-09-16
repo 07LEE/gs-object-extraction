@@ -66,3 +66,45 @@ def test_band_labels_ignore_pixels_within_band_of_the_other_side_only():
             near = ((ys - y) ** 2 + (xs - x) ** 2 <= band * band) & (mask != mask[y, x])
             assert labels[y, x] == (-1 if near.any() else int(mask[y, x]))
     assert (band_labels(np.ones((5, 5), bool), 2) == 1).all()  # the image border is not a boundary
+
+
+# A 1 x 12 image whose inside pixels 5 and 6 are more than 2 px from the boundary.
+WIDE_MASK = np.array([[0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0]], bool)
+
+
+class ChainRenderer:
+    """Footprints per Gaussian; a pixel is hidden while any of its listed blockers is drawn."""
+
+    def __init__(self, footprint, hidden_by):
+        self.footprint, self.hidden_by, self.n = footprint, hidden_by, len(footprint)
+
+    def lift(self, camera, labels, *, active=None):
+        active = np.ones(self.n, bool) if active is None else active
+        w = np.zeros((self.n, labels.shape[1]))
+        for i, cover in enumerate(self.footprint):
+            for px, v in cover.items():
+                if active[i] and not any(active[b] for b in self.hidden_by.get((i, px), ())):
+                    w[i, px] = v
+        labels = labels[0]
+        return Lifted(w[:, labels == 1].sum(1), w[:, labels == 0].sum(1), w.sum(1))
+
+
+def test_default_band_keeps_edge_gaussians_whose_spill_is_near_the_mask():
+    # 0 object core, 1 object edge that spills 1-2 px past the mask behind floor 2, 3 background across the edge.
+    renderer = ChainRenderer([{5: 1., 6: 1.}, {8: 1., 9: 1., 10: 1.}, {9: 1., 10: 1., 11: 1.}, {1: 1., 2: 1., 3: 1.}],
+                             {(1, 9): (2,), (1, 10): (2,)})
+    views = [(None, WIDE_MASK)]
+    default = extract(renderer, views)
+    np.testing.assert_array_equal(default["selected"], [True, True, False, False])
+    np.testing.assert_array_equal(default["cleaned"], [True, True, False, False])
+    np.testing.assert_array_equal(extract(renderer, views, band=0)["cleaned"], [True, False, False, False])
+
+
+def test_pruning_repeats_because_dropping_junk_can_expose_more_junk():
+    # Junk 1 and 2 sit behind floor 3 at pixel 11, and junk 2 also behind junk 1.
+    renderer = ChainRenderer([{5: 1., 6: 1.}, {6: .5, 11: 1.}, {5: .5, 11: 1.}, {11: 1.}],
+                             {(1, 11): (3,), (2, 11): (3, 1)})
+    views = [(None, WIDE_MASK)]
+    np.testing.assert_array_equal(extract(renderer, views, band=0)["selected"], [True, True, True, False])
+    np.testing.assert_array_equal(extract(renderer, views, band=0, rounds=1)["cleaned"], [True, False, True, False])
+    np.testing.assert_array_equal(extract(renderer, views, band=0)["cleaned"], [True, False, False, False])

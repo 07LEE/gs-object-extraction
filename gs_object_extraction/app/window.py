@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+import stat
 import tempfile
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QKeySequence
@@ -21,6 +22,15 @@ SELECT_HINT = ("Left click: object point   Right click: background point   Backs
                "Enter: add view   S: navigate")
 PREVIEW_HINT = "Object preview   Drag: orbit / pan   Wheel: zoom   Ctrl+Shift+S: export"
 
+
+
+def _file_mode(path):
+    """Mode for a written file: keep an existing target's mode, otherwise the umask default."""
+    if path.exists():
+        return stat.S_IMODE(path.stat().st_mode)
+    umask = os.umask(0)
+    os.umask(umask)
+    return 0o666 & ~umask
 
 class MainWindow(QMainWindow):
     def __init__(self, checkpoint=DEFAULT_CHECKPOINT):
@@ -397,6 +407,7 @@ class MainWindow(QMainWindow):
             with tempfile.NamedTemporaryFile(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent, delete=False) as stream:
                 temporary = Path(stream.name)
             save_ply(self.scene.subset(self.stages["cleaned"]), temporary)
+            os.chmod(temporary, _file_mode(path))  # the temporary file is private (0600) until now
             os.replace(temporary, path)
         except Exception as exc:
             error = str(exc)

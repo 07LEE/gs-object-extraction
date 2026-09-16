@@ -36,12 +36,13 @@ class FakeRenderer:
 
     def __init__(self, *, blocked=False, fail=False, empty=False):
         self.blocked, self.fail, self.empty = blocked, fail, empty
+        self.block_at = {1}  # lift calls that wait for the test
         self.started, self.release = threading.Event(), threading.Event()
         self.lift_threads, self.image_calls, self.depth_calls = [], [], []
 
     def lift(self, camera, labels, *, active=None):
         self.lift_threads.append(threading.get_ident())
-        if self.blocked and len(self.lift_threads) == 1:
+        if self.blocked and len(self.lift_threads) in self.block_at:
             self.started.set()
             if not self.release.wait(5):
                 raise RuntimeError("test did not release the worker")
@@ -332,3 +333,56 @@ def test_export_refuses_source_file_and_hard_link_alias(app, make_window, tmp_pa
     assert not window.export_ply(target)
     assert target.read_bytes() == original and window.source_path.read_bytes() == original
     assert dialogs == [("Cannot export object", "Choose a different file from the source scene.")]
+
+
+def test_export_uses_the_default_file_mode_and_keeps_an_existing_targets_mode(app, make_window, tmp_path, dialogs):
+    import stat
+    window, _ = make_window()
+    extract_object(app, window)
+    reference = tmp_path / "reference.txt"
+    reference.write_text("x")  # an ordinary new file gets the umask default
+    fresh = tmp_path / "fresh.ply"
+    assert window.export_ply(fresh)
+    assert stat.S_IMODE(fresh.stat().st_mode) == stat.S_IMODE(reference.stat().st_mode)
+    shared = tmp_path / "shared.ply"
+    shared.write_text("previous export")
+    shared.chmod(0o664)
+    assert window.export_ply(shared)
+    assert stat.S_IMODE(shared.stat().st_mode) == 0o664 and not dialogs
+
+
+def test_a_second_extraction_in_the_same_window_can_be_cancelled_too(app, make_window, dialogs):
+    window, renderer = make_window(FakeRenderer(blocked=True))
+    for attempt in (1, 2):
+        if attempt == 2:
+            renderer.started.clear()
+            renderer.release.clear()
+            renderer.block_at = {len(renderer.lift_threads) + 1}
+        lifts = len(renderer.lift_threads)
+        window.start_extraction()
+        wait_until(app, renderer.started.is_set)
+        assert window.cancel_button.isVisible() and window.cancel_button.isEnabled(), f"attempt {attempt}"
+        window.cancel_button.click()
+        renderer.release.set()
+        wait_until(app, lambda: window.extraction_job is None)
+        assert window.stages is None and len(renderer.lift_threads) == lifts + 1
+    assert not dialogs
+
+
+def test_reset_view_frames_the_object_in_preview_and_the_scene_otherwise(app, make_window, dialogs):
+    window, _ = make_window()
+    extract_object(app, window)
+    assert window.preview_box.currentText() == "Object only"
+    window.reset_view()
+    orbit, scene = window.viewport.orbit, window.scene
+    np.testing.assert_allclose(orbit.target, np.median(scene.means[CLEANED], axis=0))
+    camera = orbit.camera(window.viewport.width(), window.viewport.height())
+    tan_x, tan_y = camera.width / (2 * camera.fx), camera.height / (2 * camera.fy)
+    for mean, scale in zip(scene.means[CLEANED], scene.scales[CLEANED]):
+        x, y, z = camera.world_to_camera[:3, :3] @ mean + camera.world_to_camera[:3, 3]
+        radius = 3 * scale.max()  # every splat, 3 sigma wide, lies inside the view
+        assert abs(x) + radius * np.hypot(1, tan_x) <= z * tan_x
+        assert abs(y) + radius * np.hypot(1, tan_y) <= z * tan_y
+    window.preview_box.setCurrentText("Scene")
+    window.reset_view()
+    np.testing.assert_allclose(window.viewport.orbit.target, Orbit.framing(scene.means, up=window.up_vector()).target)

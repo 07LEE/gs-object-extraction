@@ -16,8 +16,8 @@ class FakePredictor:
         masks = np.zeros((3 if multimask_output else 1, 4, 5), bool)
         masks[:, 1, 2] = True
         if multimask_output:
-            masks[-1, 0, 0] = True  # the best-scoring candidate is the last one
-        scores = np.array([.2, .5, .9]) if multimask_output else np.array([.7])
+            masks[1, 0, 0] = True  # only the best-scoring candidate, the middle one, marks this pixel
+        scores = np.array([.2, .9, .5]) if multimask_output else np.array([.7])
         return masks, scores, None
 
 

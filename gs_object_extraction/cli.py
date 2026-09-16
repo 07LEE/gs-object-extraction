@@ -59,7 +59,8 @@ def extract_scene(scene_dir, model_dir, output, **options):
     save_ply(scene.subset(stages["cleaned"]), output / "object.ply")
     summary = {"scene_dir": str(scene_dir), "model_dir": str(model_dir), "options": options,
                "extraction_views": len(train), "scoring_views": len(held),
-               "scores": {name: ex.score(renderer, held, s) for name, s in stages.items()} if held else None}
+               "scores": {name: ex.score(renderer, held, s, band=options.get("band", ex.BAND)) for name, s in stages.items()}
+               if held else None}
     if held:
         camera, mask = max(held, key=lambda view: np.count_nonzero(view[1]))
         preview(renderer, camera, mask, stages["selected"], stages["cleaned"], output / "preview.png")
