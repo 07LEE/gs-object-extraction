@@ -1,76 +1,55 @@
 # 3D Gaussian Splatting Object Extraction
 
-Tool for cutting a single object out of a trained 3D Gaussian Splatting scene and saving it as a standalone PLY. Works from the trained model and per-view object masks only; source photos are never read.
+Cut one object out of a trained 3D Gaussian Splatting scene and save it as a standalone PLY. Click the object in the viewer, SAM2 masks the rendered views, and only the object's Gaussians are kept. Source photos are never read.
 
-## 1. Installation
+![A scene and the object extracted from it](docs/images/scene-and-object.jpg)
 
-### Requirements
+## How it works
 
-- CUDA GPU
-- Python 3.10+ with PyTorch and diff_gaussian_rasterization (the Graphdeco 3DGS training environment)
-- numpy, Pillow, PySide6, SAM2 (installed by the setup script)
+1. Open a PLY and look around.
+2. Click the object in a few views. SAM2 draws the mask, Enter adds the view.
+3. Extract. The masks are lifted to Gaussians, then the selection is rendered on its own to drop pieces outside the masks.
+4. Export the object.
 
-### From a local clone (editable, for development)
+## Installation
 
-Run from the repository root. The setup script builds .venv-gpu on top of the 3DGS training environment, installs requirements.txt and downloads the SAM2 checkpoint.
+Needs a CUDA GPU and the environment used to train Graphdeco 3DGS, that is PyTorch and diff_gaussian_rasterization. The script builds .venv-gpu on top of it, installs requirements.txt and fetches the SAM2 checkpoint.
 
 ```bash
 GS_PYTHON=/path/to/gs_train/bin/python scripts/setup_env.sh
 source .venv-gpu/bin/activate
 ```
 
-requirements.txt lists what is installed on top of the training environment (PySide6, SAM2 and their dependencies). The SAM2 checkpoint is saved under checkpoints. If PYTHONPATH points at another Python installation (e.g. ROS), unset it before running.
+## The viewer
 
-## 2. Quick Start
-
-### Open the viewer
+The input is the point_cloud.ply a Graphdeco 3DGS run writes.
 
 ```bash
 gs-object-extraction-gui path/to/point_cloud.ply
 ```
 
-Left drag orbits, right or middle drag pans, the wheel zooms and a double-click sets the rotation centre. The up axis is estimated from the floor (Auto) and can be set to one of the six axes in the Scene panel.
+![The viewer with one click on the object](docs/images/viewer.jpg)
 
-Press S to mark the object: a left click adds an object point, a right click a background point, and SAM2 draws the mask on the current view. Enter adds the view to the list, Backspace undoes the last point and Esc clears them. Moving the view drops points that were not added. Mark the object from several directions.
+| Input | Action |
+| --- | --- |
+| Left drag, right drag, wheel | Orbit, pan, zoom |
+| Double-click | Put the rotation centre under the cursor |
+| S | Select mode on and off |
+| Left click, right click | Object point, background point |
+| Backspace, Esc, Enter | Undo a point, clear the points, add the view |
+| Ctrl+E, Ctrl+Shift+S | Extract the object, export it as a PLY |
 
-### Extract and export in the viewer
+Mark the object all the way around, about sixteen views, with the camera kept low; steep views drag in the ground behind the object. The underside no view ever saw comes out empty, and thin structures such as leaves come out slightly thinned at the edges.
 
-After adding views, click Extract object (Ctrl+E). The tool selects Gaussians from the confirmed masks, then renders the selection on its own to remove pieces outside the masks. Progress is shown while it runs; Cancel extraction stops after the current view finishes.
+## Tests
 
-The preview switches to Object only when extraction finishes. Orbit and zoom to inspect it, use Reset view to fit the object, and choose White or Black under Object background. Choose Scene to return to marking views. Adding or removing a confirmed view clears the previous result; extract again after making changes.
-
-Click Export object PLY (Ctrl+Shift+S) to save the cleaned object. The PLY retains its Gaussian parameters, spherical harmonic coefficients, IDs and extra attributes. Choose a different file from the source scene.
-
-### Extract one 360-USID object from dataset masks
-
-```bash
-gs-object-extraction extract --scene-dir DATA/360-USID/cone --model-dir DATA/gs/cone --output outputs/cone
-```
-
-### Extract every 360-USID scene
-
-```bash
-python scripts/extract_360usid.py --data-root DATA --output outputs/360usid
-```
-
-DATA holds the dataset scenes (360-USID/scene_name) and the trained models (gs/scene_name).
-
-## 3. Core Features
-
-- Desktop Viewer: Open a Gaussian PLY and orbit, pan and zoom with GPU rendering; the view starts upright near the scene centre
-- Click-to-mask: SAM2 turns object and background clicks on the rendered view into a mask; added views are kept for extraction
-- Mask Lifting: Lift per-view object masks to Gaussians by their rendered contribution and keep the Gaussians drawn mostly inside the masks
-- Off-mask Pruning: Render the selection on its own and remove Gaussians drawn mostly outside the masks, such as floor pieces hidden in the full scene. How much spill is tolerated is adjustable: --off-threshold on the command line, Off-mask limit in the panel
-- Source-photo Free: Reads the trained PLY, camera poses and masks only
-- Graphdeco Models: Reads cameras.json and cfg_args to separate training views from held-out views; held-out views are used only for checking
-- 360-USID Scenes: Reads COLMAP sparse models, object masks and view splits in the 360-USID layout
-- Outputs: object.ply (extracted object), summary.json (Gaussian counts and check metrics per stage), preview.png (before and after, on white and black backgrounds)
-
-## 4. Tests
+The second line runs the CUDA and SAM2 tests, which the first one skips.
 
 ```bash
 python3 -m pytest -q
 GS_OBJECT_EXTRACTION_TEST_CUDA=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q
 ```
 
-The second command runs the GPU tests inside the activated .venv-gpu.
+## License
+
+Apache 2.0, see LICENSE. The renderer this tool needs, diff_gaussian_rasterization from INRIA and MPII, is licensed for non-commercial research use; commercial use needs their permission.

@@ -125,6 +125,7 @@ class MainWindow(QMainWindow):
         select.setToolButtonStyle(Qt.ToolButtonTextOnly)
         self.prompt_label = QLabel()
         self.prompt_label.setWordWrap(True)
+        self.prompt_label.setMinimumHeight(3 * self.prompt_label.fontMetrics().height())  # room for the mask line
         self.add_button = QPushButton("Add view")
         self.add_button.clicked.connect(self.add_view)
         self.view_list = QListWidget()
