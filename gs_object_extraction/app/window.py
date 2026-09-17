@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QDockWidget, QDoubleSpin
                                QScrollArea, QToolButton, QVBoxLayout, QWidget)
 from ..ply import save_ply
 from ..extract import OFF_MASK
+from .autoviews import AutoMarkJob, VIEWS
 from .extraction import ExtractionJob
 from .loading import SceneLoadJob, SegmenterLoadJob
 from .orbit import AXES, DEFAULT_UP, Orbit
@@ -45,6 +46,7 @@ class MainWindow(QMainWindow):
         self.views = []
         self.stages = None
         self.extraction_job = None
+        self.auto_job = None
         self.load_job = None
         self.model_job = None
         self._close_pending = False
@@ -135,7 +137,12 @@ class MainWindow(QMainWindow):
         self.view_list.currentRowChanged.connect(self.update_extraction_state)
         self.remove_button = QPushButton("Remove view")
         self.remove_button.clicked.connect(self.remove_view)
-        for widget in (select, self.prompt_label, self.add_button, QLabel("Views"), self.view_list, self.remove_button):
+        self.auto_button = QPushButton("Mark around the object (experimental)")
+        self.auto_button.setToolTip("Mark one view first, then this marks a ring of views from it. "
+                                    "Check the result: pressing it again keeps what is marked and adds another ring")
+        self.auto_button.clicked.connect(self.start_auto_mark)
+        for widget in (select, self.prompt_label, self.add_button, QLabel("Views"), self.view_list,
+                       self.remove_button, self.auto_button):
             column.addWidget(widget)
         return box
 
@@ -153,8 +160,8 @@ class MainWindow(QMainWindow):
         self.result_label.setWordWrap(True)
         self.progress = QProgressBar()
         self.progress.hide()
-        self.cancel_button = QPushButton("Cancel extraction")
-        self.cancel_button.clicked.connect(self.cancel_extraction)
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.clicked.connect(self.cancel_job)
         self.cancel_button.hide()
         self.preview_box = QComboBox()
         self.preview_box.addItems(["Scene", "Object only"])
@@ -327,8 +334,9 @@ class MainWindow(QMainWindow):
             self.update_extraction_state()
 
     def update_extraction_state(self, *_):
-        busy = self.extraction_job is not None or self.load_job is not None
+        busy = self.extraction_job is not None or self.auto_job is not None or self.load_job is not None
         ready = self.scene is not None and self.viewport.renderer is not None and bool(self.views) and not busy
+        self.auto_button.setEnabled(ready and self.viewport.active is None)
         result = self.stages is not None and bool(self.stages["cleaned"].any())
         preview = self.viewport.active is not None
         self.extract_action.setEnabled(ready)
@@ -367,6 +375,62 @@ class MainWindow(QMainWindow):
         self.hint.setText(PREVIEW_HINT if active is not None else
                           SELECT_HINT if self.viewport.selecting else NAVIGATE_HINT)
         self.update_extraction_state()
+
+    def start_auto_mark(self):
+        """Mark a ring of views around the object, using the views marked so far to find it."""
+        if self.extraction_job is not None or self.auto_job is not None or not self.views:
+            return
+        self.set_selecting(False)
+        self.viewport.clear_prompts()
+        self.viewport.set_suspended(True)  # the job needs the renderer and SAM2 to itself
+        camera = self.views[0].camera
+        job = AutoMarkJob(self.viewport.renderer, self.viewport.segmenter, self.scene.means, tuple(self.views),
+                          self.up_vector(), (camera.width, camera.height), self)
+        self.auto_job = job
+        job.progress.connect(self.auto_mark_progress)
+        job.succeeded.connect(self.auto_marked)
+        job.failed.connect(self.auto_mark_failed)
+        job.cancelled.connect(lambda: self.statusBar().showMessage("Marking cancelled"))
+        job.finished.connect(self.auto_mark_finished)
+        self.progress.setRange(0, VIEWS)
+        self.progress.setValue(0)
+        self.progress.show()
+        self.cancel_button.setEnabled(True)
+        self.cancel_button.show()
+        self.statusBar().showMessage("Marking views around the object...")
+        self.update_extraction_state()
+        job.start()
+
+    def auto_mark_progress(self, done, total):
+        self.progress.setRange(0, total)
+        self.progress.setValue(done)
+        if self.cancel_button.isEnabled():
+            self.statusBar().showMessage(f"Marking views: {done}/{total}")
+
+    def auto_marked(self, marked, skipped):
+        for view in marked:
+            self.views.append(view)
+            self.view_list.addItem(f"View {len(self.views)}: {int(view.mask.sum()):,} px")
+        if marked:
+            self.invalidate_result()
+        missed = f", {skipped} view(s) could not be marked" if skipped else ""
+        self.statusBar().showMessage(f"Marked {len(marked)} view(s) around the object{missed}"
+                                     if marked else f"No view could be marked{missed}")
+
+    def auto_mark_failed(self, message):
+        self.statusBar().showMessage("Marking failed")
+        if not self._close_pending:
+            QMessageBox.warning(self, "Cannot mark views", message)
+
+    def auto_mark_finished(self):
+        job, self.auto_job = self.auto_job, None
+        job.deleteLater()
+        self.progress.hide()
+        self.cancel_button.hide()
+        self.viewport.set_suspended(False)
+        self.update_extraction_state()
+        if self._close_pending:
+            self.close()
 
     def start_extraction(self):
         if self.extraction_job is not None or self.scene is None or self.viewport.renderer is None or not self.views:
@@ -424,11 +488,15 @@ class MainWindow(QMainWindow):
         if self._close_pending:
             self.close()
 
-    def cancel_extraction(self):
-        if self.extraction_job is not None:
-            self.extraction_job.requestInterruption()
+    def cancel_job(self):
+        """Stop whichever of extraction or marking is running, after its current view."""
+        job = self.extraction_job or self.auto_job
+        if job is not None:
+            job.requestInterruption()
             self.cancel_button.setEnabled(False)
             self.statusBar().showMessage("Cancelling after the current view...")
+
+    cancel_extraction = cancel_job
 
     def choose_export(self):
         if not self.export_action.isEnabled():
@@ -473,9 +541,9 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         """Let a running thread finish first: Qt cannot destroy one that is still working."""
-        if self.extraction_job is not None:
+        if self.extraction_job is not None or self.auto_job is not None:
             self._close_pending = True
-            self.cancel_extraction()
+            self.cancel_job()
             event.ignore()
             return
         if self.load_job is not None or self.model_job is not None:

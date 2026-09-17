@@ -58,26 +58,32 @@ class Segmenter:
             stack.enter_context(torch.autocast("cuda", dtype=torch.bfloat16))
         return stack
 
-    def predict(self, image, key, points, labels):
-        """Mask (bool H x W) and score for (x, y) pixel points labelled 1 (object) or 0 (background).
+    def candidates(self, image, key, points, labels, *, several=None):
+        """Masks SAM2 offers for the prompt, with their scores.
 
         ``image`` is the uint8 RGB view; ``key`` names it, so the embedding is
-        recomputed only for a new view. A single point asks SAM2 for several
-        candidates and keeps the best, as SAM2 recommends for ambiguous prompts.
+        recomputed only for a new view. ``several`` asks for the set of
+        candidates SAM2 proposes for an ambiguous prompt, which it recommends
+        for a lone point; by default that is what a lone point gets.
         """
         points = np.asarray(points, dtype=float).reshape(-1, 2)
         labels = np.asarray(labels, dtype=int).reshape(-1)
         if len(points) == 0 or len(points) != len(labels) or not np.isin(labels, (0, 1)).all():
             raise ValueError("need one 0/1 label per (x, y) point")
         predictor = self.load()
-        single = len(points) == 1
         with self._inference():
             if key != self._key:
                 predictor.set_image(np.asarray(image))
                 self._key = key
-            masks, scores, _ = predictor.predict(point_coords=points, point_labels=labels, multimask_output=single)
-        best = int(np.argmax(scores)) if single else 0
-        return np.asarray(masks[best]) > 0, float(scores[best])
+            masks, scores, _ = predictor.predict(point_coords=points, point_labels=labels,
+                                                 multimask_output=len(points) == 1 if several is None else several)
+        return np.asarray(masks) > 0, np.asarray(scores, dtype=float).reshape(-1)
+
+    def predict(self, image, key, points, labels):
+        """Mask (bool H x W) and score for (x, y) pixel points labelled 1 (object) or 0 (background)."""
+        masks, scores = self.candidates(image, key, points, labels)
+        best = int(np.argmax(scores))
+        return masks[best], float(scores[best])
 
     def forget_view(self):
         """Drop the cached view so the next prediction recomputes the embedding."""

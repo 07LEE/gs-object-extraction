@@ -113,12 +113,20 @@ class GraphdecoRenderer:
             result = self._rasterize(camera, features=self._tensor(features), active=active, background=background)
         return result[0].permute(1, 2, 0).cpu().numpy()
 
+    def _alpha(self, camera, active):
+        """Feature-1 rendering is alpha under the same geometry and compositing."""
+        return self._rasterize(camera, features=self.torch.ones_like(self.means), active=active)[0][0]
+
+    def alpha_image(self, camera, *, active=None):
+        """Coverage of the drawn Gaussians, H x W; where the object lands on screen."""
+        with self.torch.no_grad():
+            return self._alpha(camera, active).cpu().numpy()
+
     def render(self, camera, *, active=None, background=(0, 0, 0)):
         """RGB over ``background`` and alpha; ``active`` renders only those Gaussians."""
         with self.torch.no_grad():
             rgb = self._rasterize(camera, active=active, background=background)[0].permute(1, 2, 0).cpu().numpy()
-            # Feature-1 rendering is alpha under the same geometry and compositing.
-            alpha = self._rasterize(camera, features=self.torch.ones_like(self.means), active=active)[0][0].cpu().numpy()
+            alpha = self._alpha(camera, active).cpu().numpy()
         return Frame(rgb, alpha)
 
     def render_image(self, camera, *, active=None, background=(0, 0, 0)):
@@ -133,7 +141,7 @@ class GraphdecoRenderer:
             w2c = self._tensor(camera.world_to_camera)
             z = self.means @ w2c[2, :3] + w2c[2, 3]
             weighted = self._rasterize(camera, features=z[:, None].expand(-1, 3).contiguous(), active=active)[0][0]
-            alpha = self._rasterize(camera, features=self.torch.ones_like(self.means), active=active)[0][0]
+            alpha = self._alpha(camera, active)
             return (weighted / alpha.clamp_min(1e-6)).cpu().numpy(), alpha.cpu().numpy()
 
     def lift(self, camera, labels, *, active=None):
