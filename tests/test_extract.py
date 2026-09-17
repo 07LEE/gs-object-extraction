@@ -42,7 +42,9 @@ def test_prune_off_mask_drops_mostly_off_mask_and_keeps_unseen():
     selected = np.array([True, True, True, False, True])
     inside = np.array([5., 1., 2., 0., 0.])
     outside = np.array([1., 3., 2., 9., 0.])
-    np.testing.assert_array_equal(prune_off_mask(selected, inside, outside), [True, False, True, False, True])
+    np.testing.assert_array_equal(prune_off_mask(selected, inside, outside, .5), [True, False, True, False, True])
+    # the default is stricter: an even split counts as off-mask
+    np.testing.assert_array_equal(prune_off_mask(selected, inside, outside), [True, False, False, False, True])
 
 
 def test_extract_prunes_junk_that_only_shows_once_the_scene_is_left_out():
@@ -108,3 +110,12 @@ def test_pruning_repeats_because_dropping_junk_can_expose_more_junk():
     np.testing.assert_array_equal(extract(renderer, views, band=0)["selected"], [True, True, True, False])
     np.testing.assert_array_equal(extract(renderer, views, band=0, rounds=1)["cleaned"], [True, False, True, False])
     np.testing.assert_array_equal(extract(renderer, views, band=0)["cleaned"], [True, False, False, False])
+
+
+def test_off_threshold_decides_how_much_spill_a_gaussian_may_keep():
+    # Gaussian 1 draws 1.2 inside the mask and 1.0 outside it, hidden behind background 2 until it is left out.
+    renderer = ChainRenderer([{5: 1., 6: 1.}, {6: 1.2, 0: 1.}, {0: 1.}], {(1, 0): (2,)})
+    views = [(None, WIDE_MASK)]
+    np.testing.assert_array_equal(extract(renderer, views)["selected"], [True, True, False])
+    np.testing.assert_array_equal(extract(renderer, views)["cleaned"], [True, False, False])
+    np.testing.assert_array_equal(extract(renderer, views, off_threshold=.5)["cleaned"], [True, True, False])

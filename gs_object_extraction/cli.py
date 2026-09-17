@@ -78,7 +78,9 @@ def main(argv=None):
     p.add_argument("--threshold", type=float, default=ex.THRESHOLD, help="inside share needed to select a Gaussian")
     p.add_argument("--rounds", type=int, default=ex.ROUNDS, help="off-mask pruning rounds")
     p.add_argument("--band", type=int, default=ex.BAND, help="ignored boundary band in pixels while pruning and scoring")
+    p.add_argument("--off-threshold", type=float, default=ex.OFF_MASK,
+                   help="drop a Gaussian once this much of its object-only contribution lands off-mask")
     args = parser.parse_args(argv)
-    summary = extract_scene(args.scene_dir, args.model_dir, args.output,
-                            threshold=args.threshold, rounds=args.rounds, band=args.band)
+    summary = extract_scene(args.scene_dir, args.model_dir, args.output, threshold=args.threshold,
+                            rounds=args.rounds, band=args.band, off_threshold=args.off_threshold)
     print(json.dumps(summary["scores"], indent=1))

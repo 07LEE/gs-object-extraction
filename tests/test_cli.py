@@ -52,7 +52,8 @@ def test_band_reaches_pruning_and_scoring_and_is_recorded(fake_scene, tmp_path, 
     out = tmp_path / "out"
     cli.main(["extract", "--scene-dir", "s", "--model-dir", "m", "--output", str(out), "--band", "0"])
     summary = json.loads((out / "summary.json").read_text())
-    assert summary["options"] == {"threshold": ex.THRESHOLD, "rounds": ex.ROUNDS, "band": 0}
+    assert summary["options"] == {"threshold": ex.THRESHOLD, "rounds": ex.ROUNDS, "band": 0,
+                                  "off_threshold": ex.OFF_MASK}
     assert summary["scores"]["selected"] == {"gaussians": 3, "dirt": 1 / 3, "missing": 0.0}
     assert summary["scores"]["cleaned"] == {"gaussians": 2, "dirt": 0.0, "missing": 0.0}
     assert len(load_ply(out / "object.ply").means) == 2
@@ -110,3 +111,13 @@ def test_usid_views_refuse_photos_the_model_never_saw(tmp_path):
     graphdeco_model(tmp_path / "model", names[:7])
     with pytest.raises(ValueError, match="missing"):
         cli.usid_views(tmp_path / "scene", tmp_path / "model")
+
+
+def test_off_threshold_reaches_pruning_and_is_recorded(fake_scene, tmp_path):
+    out = tmp_path / "out"
+    cli.main(["extract", "--scene-dir", "s", "--model-dir", "m", "--output", str(out), "--band", "0",
+              "--off-threshold", "0.9"])
+    summary = json.loads((out / "summary.json").read_text())
+    assert summary["options"]["off_threshold"] == .9
+    # the junk Gaussian spills two thirds off-mask, which this limit tolerates
+    assert summary["scores"]["cleaned"]["gaussians"] == summary["scores"]["selected"]["gaussians"] == 3

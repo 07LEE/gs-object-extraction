@@ -6,10 +6,11 @@ import stat
 import tempfile
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QKeySequence
-from PySide6.QtWidgets import (QApplication, QComboBox, QDockWidget, QFileDialog, QFormLayout, QGroupBox, QLabel,
-                               QListWidget, QMainWindow, QMessageBox, QProgressBar, QPushButton, QScrollArea,
-                               QToolButton, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QComboBox, QDockWidget, QDoubleSpinBox, QFileDialog, QFormLayout,
+                               QGroupBox, QLabel, QListWidget, QMainWindow, QMessageBox, QProgressBar, QPushButton,
+                               QScrollArea, QToolButton, QVBoxLayout, QWidget)
 from ..ply import load_ply, save_ply
+from ..extract import OFF_MASK
 from .extraction import ExtractionJob
 from .orbit import AXES, DEFAULT_UP, Orbit, estimate_up
 from .segmenter import DEFAULT_CHECKPOINT, Segmenter
@@ -139,6 +140,11 @@ class MainWindow(QMainWindow):
         column = QVBoxLayout(box)
         self.extract_button = QPushButton("Extract object")
         self.extract_button.clicked.connect(self.start_extraction)
+        self.off_threshold_box = QDoubleSpinBox()
+        self.off_threshold_box.setRange(.05, .95)
+        self.off_threshold_box.setSingleStep(.05)
+        self.off_threshold_box.setValue(OFF_MASK)
+        self.off_threshold_box.setToolTip("Lower removes more pieces that stray outside the mask, at the cost of thinner edges")
         self.result_label = QLabel("Add views, then extract the object")
         self.result_label.setWordWrap(True)
         self.progress = QProgressBar()
@@ -154,7 +160,8 @@ class MainWindow(QMainWindow):
         self.background_box.currentIndexChanged.connect(self.update_preview)
         self.export_button = QPushButton("Export object PLY...")
         self.export_button.clicked.connect(self.choose_export)
-        for widget in (self.extract_button, self.result_label, self.progress, self.cancel_button,
+        for widget in (QLabel("Off-mask limit"), self.off_threshold_box,
+                       self.extract_button, self.result_label, self.progress, self.cancel_button,
                        QLabel("Preview"), self.preview_box, QLabel("Object background"),
                        self.background_box, self.export_button):
             column.addWidget(widget)
@@ -291,6 +298,7 @@ class MainWindow(QMainWindow):
         self.background_box.setEnabled(result and preview and not busy)
         self.open_action.setEnabled(not busy)
         self.scene_box.setEnabled(not busy)
+        self.off_threshold_box.setEnabled(not busy)
         self.view_list.setEnabled(not busy)
         self.remove_button.setEnabled(not busy and self.view_list.currentRow() >= 0)
         for action in (self.select_action, self.undo_action, self.clear_action):
@@ -325,7 +333,8 @@ class MainWindow(QMainWindow):
         self.set_selecting(False)
         self.viewport.clear_prompts()
         self.viewport.set_suspended(True)
-        job = ExtractionJob(self.viewport.renderer, tuple(self.views), self)
+        job = ExtractionJob(self.viewport.renderer, tuple(self.views), self,
+                            off_threshold=self.off_threshold_box.value())
         self.extraction_job = job
         job.progress.connect(self.extraction_progress)
         job.succeeded.connect(self.extraction_succeeded)

@@ -60,7 +60,7 @@ DATA holds the dataset scenes (360-USID/scene_name) and the trained models (gs/s
 - Desktop Viewer: Open a Gaussian PLY and orbit, pan and zoom with GPU rendering; the view starts upright near the scene centre
 - Click-to-mask: SAM2 turns object and background clicks on the rendered view into a mask; added views are kept for extraction
 - Mask Lifting: Lift per-view object masks to Gaussians by their rendered contribution and keep the Gaussians drawn mostly inside the masks
-- Off-mask Pruning: Render the selection on its own and remove Gaussians drawn mostly outside the masks, such as floor pieces hidden in the full scene
+- Off-mask Pruning: Render the selection on its own and remove Gaussians drawn mostly outside the masks, such as floor pieces hidden in the full scene. How much spill is tolerated is adjustable: --off-threshold on the command line, Off-mask limit in the panel
 - Source-photo Free: Reads the trained PLY, camera poses and masks only
 - Graphdeco Models: Reads cameras.json and cfg_args to separate training views from held-out views; held-out views are used only for checking
 - 360-USID Scenes: Reads COLMAP sparse models, object masks and view splits in the 360-USID layout

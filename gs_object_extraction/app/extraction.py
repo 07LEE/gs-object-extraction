@@ -1,7 +1,7 @@
 """Background mask lifting and cleanup with cooperative cancellation."""
 
 from PySide6.QtCore import QThread, Signal
-from ..extract import extract
+from ..extract import OFF_MASK, extract
 
 
 class _ExtractionCancelled(Exception):
@@ -14,10 +14,11 @@ class ExtractionJob(QThread):
     failed = Signal(str)
     cancelled = Signal()
 
-    def __init__(self, renderer, views, parent=None):
+    def __init__(self, renderer, views, parent=None, *, off_threshold=OFF_MASK):
         super().__init__(parent)
         self.renderer = renderer
         self.views = tuple((view.camera, view.mask) for view in views)
+        self.off_threshold = off_threshold
 
     def _check_cancelled(self):
         if self.isInterruptionRequested():
@@ -30,7 +31,7 @@ class ExtractionJob(QThread):
     def run(self):
         try:
             self._check_cancelled()
-            stages = extract(self.renderer, self.views, progress=self._report_progress)
+            stages = extract(self.renderer, self.views, off_threshold=self.off_threshold, progress=self._report_progress)
             self._check_cancelled()
         except _ExtractionCancelled:
             self.cancelled.emit()

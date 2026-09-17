@@ -386,3 +386,14 @@ def test_reset_view_frames_the_object_in_preview_and_the_scene_otherwise(app, ma
     window.preview_box.setCurrentText("Scene")
     window.reset_view()
     np.testing.assert_allclose(window.viewport.orbit.target, Orbit.framing(scene.means, up=window.up_vector()).target)
+
+
+def test_off_mask_limit_from_the_panel_reaches_the_extraction(app, make_window, dialogs):
+    window, _ = make_window()
+    assert window.off_threshold_box.value() == pytest.approx(0.35)
+    window.off_threshold_box.setValue(.9)  # tolerate the junk Gaussian's two thirds of spill
+    extract_object(app, window)
+    np.testing.assert_array_equal(window.stages["cleaned"], SELECTED)
+    window.off_threshold_box.setValue(.35)
+    extract_object(app, window)
+    np.testing.assert_array_equal(window.stages["cleaned"], CLEANED)

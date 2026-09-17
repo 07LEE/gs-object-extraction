@@ -12,6 +12,7 @@ from .masks import band_labels
 from .renderer import Lifted
 
 THRESHOLD, MIN_SUPPORT, ROUNDS, BAND = .65, .05, 2, 2
+OFF_MASK = .35  # drop a Gaussian once this much of its object-only contribution lands off-mask
 
 
 def lift_masks(renderer, views, *, band=0, active=None, on_view=None):
@@ -31,14 +32,14 @@ def select(lifted, threshold=THRESHOLD, min_support=MIN_SUPPORT):
     return (support >= min_support) & (share >= threshold)
 
 
-def prune_off_mask(selected, inside, outside, threshold=.5):
+def prune_off_mask(selected, inside, outside, threshold=OFF_MASK):
     """Keep selected Gaussians unless most of their object-only contribution is off-mask."""
     total = inside + outside
     off = np.divide(outside, total, out=np.zeros_like(total, dtype=float), where=total > 0)
     return selected & ~(off > threshold)
 
 
-def extract(renderer, views, *, threshold=THRESHOLD, min_support=MIN_SUPPORT, rounds=ROUNDS, band=BAND,
+def extract(renderer, views, *, threshold=THRESHOLD, min_support=MIN_SUPPORT, rounds=ROUNDS, band=BAND, off_threshold=OFF_MASK,
             progress=None):
     """Return ``selected`` and ``cleaned`` boolean arrays over the scene.
 
@@ -64,7 +65,7 @@ def extract(renderer, views, *, threshold=THRESHOLD, min_support=MIN_SUPPORT, ro
     for round_index in range(rounds):
         stage = f"Cleaning {round_index + 1}/{rounds}"
         own = lift_masks(renderer, views, band=band, active=selected, on_view=report_view)
-        selected = prune_off_mask(selected, own.inside, own.outside)
+        selected = prune_off_mask(selected, own.inside, own.outside, off_threshold)
     stages["cleaned"] = selected
     return stages
 
