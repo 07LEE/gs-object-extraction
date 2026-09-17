@@ -9,10 +9,11 @@ from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (QApplication, QComboBox, QDockWidget, QDoubleSpinBox, QFileDialog, QFormLayout,
                                QGroupBox, QLabel, QListWidget, QMainWindow, QMessageBox, QProgressBar, QPushButton,
                                QScrollArea, QToolButton, QVBoxLayout, QWidget)
-from ..ply import load_ply, save_ply
+from ..ply import save_ply
 from ..extract import OFF_MASK
 from .extraction import ExtractionJob
-from .orbit import AXES, DEFAULT_UP, Orbit, estimate_up
+from .loading import SceneLoadJob, SegmenterLoadJob
+from .orbit import AXES, DEFAULT_UP, Orbit
 from .segmenter import DEFAULT_CHECKPOINT, Segmenter
 from .viewport import BACKGROUND, Viewport
 from .views import MaskedView
@@ -44,6 +45,8 @@ class MainWindow(QMainWindow):
         self.views = []
         self.stages = None
         self.extraction_job = None
+        self.load_job = None
+        self.model_job = None
         self._close_pending = False
         self.viewport = Viewport(self)
         self.viewport.segmenter = Segmenter(checkpoint)
@@ -174,37 +177,52 @@ class MainWindow(QMainWindow):
             self.open_ply(path)
 
     def open_ply(self, path):
-        """Keep the scene on read failure; release it before allocating a new GPU scene."""
-        if self.extraction_job is not None:
+        """Start loading in the background; the scene is replaced only once it is read."""
+        if self.extraction_job is not None or self.load_job is not None:
             return False
-        from ..renderer import GraphdecoRenderer
-        QApplication.setOverrideCursor(Qt.WaitCursor)
-        try:
-            scene = load_ply(path)
-            self.scene = self.source_path = None
-            self.invalidate_result()
-            self.views.clear()
-            self.view_list.clear()
-            self.viewport.clear()  # release the previous scene's GPU memory first
-            self.file_label.setText("-")
-            self.file_label.setToolTip("")
-            self.count_label.setText("-")
-            renderer = GraphdecoRenderer(scene)
-        except Exception as exc:
-            QApplication.restoreOverrideCursor()
-            QMessageBox.critical(self, "Cannot open file", f"{Path(path).name}: {exc}")
-            self.update_extraction_state()
-            return False
-        QApplication.restoreOverrideCursor()
-        self.scene = scene
-        self.source_path = Path(path).resolve()
+        self.scene = self.source_path = None
+        self.invalidate_result()
+        self.views.clear()
+        self.view_list.clear()
+        self.viewport.clear()  # release the previous scene's GPU memory first
         self.file_label.setText(Path(path).name)
         self.file_label.setToolTip(str(path))
-        self.count_label.setText(f"{len(scene.means):,}")
-        self.auto_up = estimate_up(scene.means)
-        self.viewport.set_scene(renderer, Orbit.framing(scene.means, up=self.up_vector()))
+        self.count_label.setText("-")
+        chosen = None if self.up_box.currentText() == "Auto" else self.up_vector()
+        job = SceneLoadJob(path, chosen, self)
+        self.load_job = job
+        job.progress.connect(lambda stage: self.statusBar().showMessage(f"{stage}..."))
+        job.succeeded.connect(self.scene_loaded)
+        job.failed.connect(lambda message: self.scene_load_failed(path, message))
+        job.finished.connect(self.load_finished)
+        self.progress.setRange(0, 0)
+        self.progress.show()
         self.update_extraction_state()
+        job.start()
         return True
+
+    def scene_loaded(self, scene, renderer, up, orbit):
+        self.scene = scene
+        self.source_path = Path(self.load_job.path).resolve()
+        self.count_label.setText(f"{len(scene.means):,}")
+        self.auto_up = up
+        self.viewport.set_scene(renderer, orbit)
+        self.statusBar().showMessage(f"Opened {self.source_path.name}: {len(scene.means):,} Gaussians")
+
+    def scene_load_failed(self, path, message):
+        self.file_label.setText("-")
+        self.file_label.setToolTip("")
+        self.statusBar().showMessage("Could not open the file")
+        if not self._close_pending:
+            QMessageBox.critical(self, "Cannot open file", f"{Path(path).name}: {message}")
+
+    def load_finished(self):
+        job, self.load_job = self.load_job, None
+        job.deleteLater()
+        self.progress.hide()
+        self.update_extraction_state()
+        if self._close_pending:
+            self.close()
 
     def up_vector(self):
         choice = self.up_box.currentText()
@@ -240,6 +258,28 @@ class MainWindow(QMainWindow):
         self.select_action.setChecked(self.viewport.selecting)
         self.hint.setText(PREVIEW_HINT if self.viewport.active is not None else
                           SELECT_HINT if self.viewport.selecting else NAVIGATE_HINT)
+        if self.viewport.selecting:
+            self.load_segmenter()
+
+    def load_segmenter(self):
+        """Build SAM2 now, so the first click does not wait for it."""
+        segmenter = self.viewport.segmenter
+        if self.model_job is not None or segmenter is None or getattr(segmenter, "loaded", True):
+            return
+        job = SegmenterLoadJob(segmenter, self)
+        self.model_job = job
+        job.failed.connect(lambda message: self.statusBar().showMessage(f"SAM2 did not load: {message}"))
+        job.finished.connect(self.segmenter_load_finished)
+        self.statusBar().showMessage("Loading SAM2...")
+        job.start()
+
+    def segmenter_load_finished(self):
+        job, self.model_job = self.model_job, None
+        job.deleteLater()
+        if self.viewport.segmenter.loaded and self.viewport.selecting:
+            self.statusBar().showMessage("Click the object")
+        if self._close_pending:
+            self.close()
         self.update_prompt_state()
 
     def update_prompt_state(self):
@@ -287,7 +327,7 @@ class MainWindow(QMainWindow):
             self.update_extraction_state()
 
     def update_extraction_state(self, *_):
-        busy = self.extraction_job is not None
+        busy = self.extraction_job is not None or self.load_job is not None
         ready = self.scene is not None and self.viewport.renderer is not None and bool(self.views) and not busy
         result = self.stages is not None and bool(self.stages["cleaned"].any())
         preview = self.viewport.active is not None
@@ -432,9 +472,18 @@ class MainWindow(QMainWindow):
         return True
 
     def closeEvent(self, event):
+        """Let a running thread finish first: Qt cannot destroy one that is still working."""
         if self.extraction_job is not None:
             self._close_pending = True
             self.cancel_extraction()
+            event.ignore()
+            return
+        if self.load_job is not None or self.model_job is not None:
+            self._close_pending = True
+            for job in (self.load_job, self.model_job):
+                if job is not None:
+                    job.requestInterruption()
+            self.statusBar().showMessage("Finishing the current step before closing...")
             event.ignore()
             return
         super().closeEvent(event)

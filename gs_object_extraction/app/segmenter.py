@@ -7,6 +7,7 @@ The model loads on first use. The image embedding is computed once per view
 import contextlib
 from pathlib import Path
 import re
+import threading
 import numpy as np
 
 DEFAULT_CHECKPOINT = Path(__file__).resolve().parents[2] / "checkpoints" / "sam2.1_hiera_base_plus.pt"
@@ -28,19 +29,22 @@ class Segmenter:
         self.checkpoint = Path(checkpoint)
         self._predictor = predictor
         self._key = None
+        self._lock = threading.Lock()  # a click during a background load waits instead of building a second model
 
     @property
     def loaded(self):
         return self._predictor is not None
 
-    def _load(self):
-        if self._predictor is None:
-            if not self.checkpoint.exists():
-                raise FileNotFoundError(f"SAM2 checkpoint not found: {self.checkpoint} (run scripts/setup_env.sh)")
-            from sam2.build_sam import build_sam2
-            from sam2.sam2_image_predictor import SAM2ImagePredictor
-            self._predictor = SAM2ImagePredictor(build_sam2(config_for(self.checkpoint), str(self.checkpoint), device="cuda"))
-        return self._predictor
+    def load(self):
+        """Build the model, from this thread or another; the first caller does the work."""
+        with self._lock:
+            if self._predictor is None:
+                if not self.checkpoint.exists():
+                    raise FileNotFoundError(f"SAM2 checkpoint not found: {self.checkpoint} (run scripts/setup_env.sh)")
+                from sam2.build_sam import build_sam2
+                from sam2.sam2_image_predictor import SAM2ImagePredictor
+                self._predictor = SAM2ImagePredictor(build_sam2(config_for(self.checkpoint), str(self.checkpoint), device="cuda"))
+            return self._predictor
 
     @staticmethod
     def _inference():
@@ -65,7 +69,7 @@ class Segmenter:
         labels = np.asarray(labels, dtype=int).reshape(-1)
         if len(points) == 0 or len(points) != len(labels) or not np.isin(labels, (0, 1)).all():
             raise ValueError("need one 0/1 label per (x, y) point")
-        predictor = self._load()
+        predictor = self.load()
         single = len(points) == 1
         with self._inference():
             if key != self._key:

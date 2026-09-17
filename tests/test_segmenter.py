@@ -58,6 +58,35 @@ def test_missing_checkpoint_says_how_to_get_it(tmp_path):
     assert not seg.loaded
 
 
+def test_racing_callers_build_one_model(tmp_path, monkeypatch):
+    """A click while the background load runs waits for it instead of building a second model."""
+    import sys
+    import threading
+    import time
+    import types
+    checkpoint = tmp_path / "sam2.1_hiera_tiny.pt"
+    checkpoint.write_bytes(b"")
+    built = []
+
+    def build_sam2(config, path, device):
+        time.sleep(.05)  # long enough for the other threads to arrive
+        built.append(config)
+        return object()
+
+    monkeypatch.setitem(sys.modules, "sam2", types.ModuleType("sam2"))
+    monkeypatch.setitem(sys.modules, "sam2.build_sam", types.SimpleNamespace(build_sam2=build_sam2))
+    monkeypatch.setitem(sys.modules, "sam2.sam2_image_predictor",
+                        types.SimpleNamespace(SAM2ImagePredictor=lambda model: model))
+    seg = Segmenter(checkpoint)
+    results = []
+    threads = [threading.Thread(target=lambda: results.append(seg.load())) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(5)
+    assert len(built) == 1 and len(results) == 4 and all(r is results[0] for r in results)
+
+
 @pytest.mark.skipif(os.environ.get("GS_OBJECT_EXTRACTION_TEST_CUDA") != "1" or not DEFAULT_CHECKPOINT.exists(),
                     reason="needs the GPU environment and the SAM2 checkpoint")
 def test_sam2_segments_a_rendered_blob_from_one_click():

@@ -211,6 +211,7 @@ def test_confirmed_view_or_scene_changes_invalidate_results(app, make_window, mo
         save_ply(make_scene(), replacement)
         monkeypatch.setattr("gs_object_extraction.renderer.GraphdecoRenderer", lambda scene: FakeRenderer())
         assert window.open_ply(replacement)
+        wait_until(app, lambda: window.load_job is None)
         assert window.source_path == replacement.resolve() and not window.views
     assert window.stages is None and window.viewport.active is None
     assert window.preview_box.currentText() == "Scene"

@@ -1,10 +1,12 @@
 import os
+import threading
+import time
 import numpy as np
 import pytest
 
 pytest.importorskip("PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-from PySide6.QtCore import QEvent, QPointF, Qt
+from PySide6.QtCore import QEvent, QPointF, Qt, QTimer
 from PySide6.QtGui import QColor, QMouseEvent
 from PySide6.QtWidgets import QApplication
 from gs_object_extraction.app.orbit import Orbit
@@ -35,8 +37,16 @@ def test_unreadable_file_is_reported_and_the_window_stays_empty(app, tmp_path, m
     bad = tmp_path / "bad.ply"
     bad.write_text("not a ply")
     window = MainWindow()
-    assert window.open_ply(bad) is False
-    assert "bad.ply" in shown[0] and window.scene is None
+    assert open_and_wait(window, bad)  # the read happens in the background, the failure comes back from it
+    assert "bad.ply" in shown[0] and window.scene is None and window.file_label.text() == "-"
+
+
+def open_and_wait(window, path):
+    """Open a scene the way the window does now, in the background, and let the job finish."""
+    started = window.open_ply(path)
+    while window.load_job is not None:
+        QApplication.processEvents()
+    return started
 
 
 def mouse(kind, x, y, button):
@@ -53,7 +63,7 @@ def test_opened_scene_renders_and_drags_move_the_camera(app, tmp_path):
     window = MainWindow()
     window.resize(480, 360)
     window.show()
-    assert window.open_ply(tmp_path / "blob.ply") and window.count_label.text() == "400"
+    assert open_and_wait(window, tmp_path / "blob.ply") and window.count_label.text() == "400"
     view = window.viewport
     view.render_now()
     cx, cy = view.image.width() // 2, view.image.height() // 2
@@ -78,7 +88,7 @@ def test_double_click_on_the_object_makes_it_the_orbit_centre_without_moving_the
     window = MainWindow()
     window.resize(480, 360)
     window.show()
-    window.open_ply(tmp_path / "ball.ply")
+    open_and_wait(window, tmp_path / "ball.ply")
     view = window.viewport
     view.orbit = Orbit(np.array([2., 0., 0.]), 6.)  # look beside the ball first
     view.render_now()
@@ -201,7 +211,7 @@ def test_real_sam2_click_marks_the_rendered_blob(app, tmp_path):
     window = MainWindow()
     window.resize(480, 360)
     window.show()
-    window.open_ply(tmp_path / "blob.ply")
+    open_and_wait(window, tmp_path / "blob.ply")
     view = window.viewport
     view.orbit = Orbit(np.zeros(3), 2.5)
     view.view_changed()
@@ -410,6 +420,98 @@ def test_each_new_frame_gets_a_new_sam2_embedding(app):
     view.render_now()
     click(view, 100, 80, Qt.LeftButton)
     assert len(predictor.images) == 2 and np.array_equal(predictor.images[1], view.pixels)
+
+
+class SlowSegmenter:
+    """Loads only when released, so a test can look at the window mid-load."""
+
+    def __init__(self):
+        self.loaded = False
+        self.builds = 0
+        self.release = threading.Event()
+
+    def load(self):
+        assert self.release.wait(5)
+        self.builds += 1
+        self.loaded = True
+
+
+def pump(app, predicate, timeout=5):
+    deadline = time.monotonic() + timeout
+    while not predicate() and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(.001)
+    app.processEvents()
+    assert predicate(), "the window did not reach the expected state before the timeout"
+
+
+def slow_scene(monkeypatch, release):
+    """Make opening a PLY block in the worker thread until release is set."""
+    scene = GaussianScene.from_colors(np.zeros((4, 3)), np.full((4, 3), .1), np.full((4, 3), .5), np.full(4, .9))
+
+    def load(path):
+        assert release.wait(5)
+        return scene
+
+    monkeypatch.setattr("gs_object_extraction.app.loading.load_ply", load)
+    monkeypatch.setattr("gs_object_extraction.renderer.GraphdecoRenderer", lambda scene: ShiftingRenderer())
+    return scene
+
+
+def test_the_window_stays_alive_while_a_scene_loads(app, tmp_path, monkeypatch):
+    release = threading.Event()
+    scene = slow_scene(monkeypatch, release)
+    window = MainWindow()
+    window.show()
+    assert window.open_ply(tmp_path / "slow.ply")
+    ticks = []
+    QTimer.singleShot(0, lambda: ticks.append(1))
+    pump(app, lambda: ticks)  # the event loop keeps turning: the window is not frozen
+    assert window.progress.isVisible() and window.file_label.text() == "slow.ply"
+    assert not window.open_action.isEnabled() and not window.scene_box.isEnabled()
+    assert not window.open_ply(tmp_path / "other.ply")  # one load at a time
+    release.set()
+    pump(app, lambda: window.load_job is None)
+    assert window.scene is scene and window.count_label.text() == "4"
+    assert window.viewport.renderer is not None and window.open_action.isEnabled() and not window.progress.isVisible()
+
+
+def test_closing_while_a_scene_loads_waits_for_the_thread(app, tmp_path, monkeypatch):
+    release = threading.Event()
+    slow_scene(monkeypatch, release)
+    window = MainWindow()
+    window.show()
+    window.open_ply(tmp_path / "slow.ply")
+    app.processEvents()
+    assert window.close() is False and window.isVisible()  # a running thread cannot be destroyed
+    release.set()
+    pump(app, lambda: window.load_job is None and not window.isVisible())
+
+
+def test_select_mode_loads_sam2_once_in_the_background(app):
+    segmenter = SlowSegmenter()
+    window, view = ready_window(segmenter)
+    window.set_selecting(True)
+    assert window.model_job is not None and not segmenter.loaded
+    window.set_selecting(True)  # no second model for a second look at select mode
+    assert "SAM2" in window.statusBar().currentMessage()
+    segmenter.release.set()
+    pump(app, lambda: window.model_job is None)
+    assert segmenter.builds == 1 and segmenter.loaded
+    window.set_selecting(False)
+    window.set_selecting(True)
+    assert window.model_job is None  # already loaded
+
+
+def test_a_failed_sam2_load_is_reported_without_a_dialog(app, monkeypatch):
+    class BrokenSegmenter(SlowSegmenter):
+        def load(self):
+            raise FileNotFoundError("SAM2 checkpoint not found: x.pt (run scripts/setup_env.sh)")
+
+    window, view = ready_window(BrokenSegmenter())
+    window.set_selecting(True)
+    pump(app, lambda: window.model_job is None)
+    assert "setup_env.sh" in window.statusBar().currentMessage()
 
 
 def test_sam2_checkpoint_option_reaches_the_window(app, monkeypatch):
