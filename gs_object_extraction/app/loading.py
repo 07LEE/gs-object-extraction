@@ -2,7 +2,7 @@
 
 from PySide6.QtCore import QThread, Signal
 from ..ply import load_ply
-from .orbit import Orbit, estimate_up
+from .orbit import Orbit, estimate_up, frame_scene
 
 
 class SceneLoadJob(QThread):
@@ -34,7 +34,7 @@ class SceneLoadJob(QThread):
                 return
             self.progress.emit("Framing the scene")
             up = estimate_up(scene.means)
-            orbit = Orbit.framing(scene.means, up=up if self.chosen_up is None else self.chosen_up)
+            orbit = frame_scene(renderer, scene.means, up=up if self.chosen_up is None else self.chosen_up)
         except Exception as exc:
             self.failed.emit(str(exc))
         else:

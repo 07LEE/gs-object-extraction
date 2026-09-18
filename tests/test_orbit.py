@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
-from gs_object_extraction.app.orbit import AXES, DEFAULT_UP, PITCH_LIMIT, Orbit, estimate_up, unproject
+from gs_object_extraction.app.orbit import (AXES, DEFAULT_UP, PITCH_LIMIT, Orbit, estimate_up, frame_scene,
+                                            unproject)
 
 UPS = [*AXES.values(), (.1, -.9, -.4)]
 
@@ -98,3 +99,42 @@ def test_unproject_inverts_projection():
     point = np.array([.4, -.25, .3])
     (u, v), depth = project(camera, point)
     np.testing.assert_allclose(unproject(camera, u, v, depth), point, atol=1e-9)
+
+
+class Scanned:
+    """A scene the camera can only see across from far enough, and only up to a point."""
+
+    def __init__(self, centre, sees_across_from, empty_beyond=None):
+        self.centre = np.asarray(centre, dtype=float)
+        self.sees_across_from, self.empty_beyond = sees_across_from, empty_beyond
+        self.tried = []
+
+    def depth_image(self, camera, *, active=None):
+        rotation, translation = camera.world_to_camera[:3, :3], camera.world_to_camera[:3, 3]
+        distance = float(np.linalg.norm(-rotation.T @ translation - self.centre))
+        self.tried.append(distance)
+        shape = (camera.height, camera.width)
+        if self.empty_beyond is not None and distance > self.empty_beyond:
+            return np.full(shape, distance), np.zeros(shape)  # the scene has fallen out of the frame
+        near = distance if distance >= self.sees_across_from else .2 * distance
+        return np.full(shape, near), np.ones(shape)
+
+
+def test_framing_stands_as_far_back_as_the_scene_allows():
+    means = np.random.default_rng(0).normal(0, 1, (500, 3))
+    spread = float(np.median(np.linalg.norm(means - np.median(means, axis=0), axis=1)))
+    # Blocked up close, open from 1.5 medians out, and the scene stays in frame throughout.
+    renderer = Scanned(np.median(means, axis=0), sees_across_from=1.4 * spread)
+    assert frame_scene(renderer, means).distance == pytest.approx(4. * spread)
+    # Open everywhere, but past 2 medians the frame is mostly empty.
+    renderer = Scanned(np.median(means, axis=0), sees_across_from=0., empty_beyond=2. * spread)
+    assert frame_scene(renderer, means).distance == pytest.approx(1.5 * spread)
+
+
+def test_framing_falls_back_when_no_distance_works():
+    means = np.random.default_rng(1).normal(0, 1, (500, 3))
+    spread = float(np.median(np.linalg.norm(means - np.median(means, axis=0), axis=1)))
+    renderer = Scanned(np.median(means, axis=0), sees_across_from=1e9)  # blocked wherever it stands
+    orbit = frame_scene(renderer, means)
+    assert orbit.distance == pytest.approx(.6 * spread)
+    assert renderer.tried and max(renderer.tried) == pytest.approx(4. * spread)  # it did try the whole range

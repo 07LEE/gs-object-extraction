@@ -14,6 +14,9 @@ AXES = {"+X": (1., 0., 0.), "-X": (-1., 0., 0.), "+Y": (0., 1., 0.),
 DEFAULT_UP = AXES["-Y"]  # camera up in COLMAP's first view, the usual fallback
 PITCH_LIMIT = np.deg2rad(89.)
 PLANE_RATIO = .2  # least/middle variance below this counts as a clear plane
+FRAMING_STEPS = (.6, 1., 1.5, 2.5, 4.)  # distances to try, in medians of the scene's spread
+OPEN = .65  # a view is open when what it looks at sits at least this far out, of the way to the middle
+FILLED = .95  # ... and it still has to look at the scene, not past it
 
 
 def estimate_up(means):
@@ -53,16 +56,12 @@ class Orbit:
         self.up = _unit(self.up)
 
     @classmethod
-    def framing(cls, means, up=DEFAULT_UP, fov_y=50.):
-        """Start inside the scene looking at the median Gaussian, where a 360 capture keeps its subject.
-
-        The distance is 0.6 x the median distance of the Gaussians from that point,
-        so the surrounding background neither hides the subject nor slows the view.
-        """
+    def framing(cls, means, up=DEFAULT_UP, fov_y=50., distance=.6):
+        """Look at the median Gaussian from ``distance`` times the median spread around it."""
         means = np.asarray(means, dtype=float)
         centre = np.median(means, axis=0)
         spread = float(np.median(np.linalg.norm(means - centre, axis=1)))
-        return cls(centre, max(.6 * spread, 1e-6), up=up, fov_y=fov_y)
+        return cls(centre, max(distance * spread, 1e-6), up=up, fov_y=fov_y)
 
     def _basis(self):
         u = self.up
@@ -119,6 +118,29 @@ def _unit(vector):
     if v.shape != (3,) or not np.isfinite(norm) or norm < 1e-9:
         raise ValueError("up must be a nonzero 3-vector")
     return v / norm
+
+
+def frame_scene(renderer, means, up=DEFAULT_UP, fov_y=50., size=(160, 120), steps=FRAMING_STEPS,
+                open_enough=OPEN, filled_enough=FILLED):
+    """Stand as far back as the scene lets you, and look at the middle of it.
+
+    A capture that circles one subject keeps background all around it, so the camera
+    has to stay inside that shell; a scene shot along its subject, a train beside its
+    track, needs room to see it whole. Two cheap renders per distance tell them apart.
+    A blocked view looks at something close in front of it, relative to how far the
+    camera stands. A view that has escaped the scene has empty frame around it. The
+    furthest distance that is neither is where the scene opens up.
+    """
+    means = np.asarray(means, dtype=float)
+    centre = np.median(means, axis=0)  # measured once: the scan only moves the camera
+    spread = float(np.median(np.linalg.norm(means - centre, axis=1)))
+    for distance in sorted(steps, reverse=True):  # the furthest that works wins, so start there
+        orbit = Orbit(centre, max(distance * spread, 1e-6), up=up, fov_y=fov_y)
+        depth, alpha = renderer.depth_image(orbit.camera(*size))
+        solid = alpha > .5
+        if solid.mean() >= filled_enough and float(np.median(depth[solid])) / orbit.distance >= open_enough:
+            return orbit
+    return Orbit(centre, max(.6 * spread, 1e-6), up=up, fov_y=fov_y)
 
 
 def unproject(camera, x, y, depth):

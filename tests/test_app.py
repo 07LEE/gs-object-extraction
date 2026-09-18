@@ -404,6 +404,10 @@ class ShiftingRenderer:
         self.frames += 1
         return np.full((camera.height, camera.width, 3), 10 * self.frames, np.uint8)
 
+    def depth_image(self, camera, *, active=None):
+        shape = (camera.height, camera.width)
+        return np.full(shape, 2.), np.ones(shape)
+
 
 def test_each_new_frame_gets_a_new_sam2_embedding(app):
     from gs_object_extraction.app.segmenter import Segmenter
