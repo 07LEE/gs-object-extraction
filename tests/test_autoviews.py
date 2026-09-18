@@ -222,7 +222,8 @@ def test_the_window_adds_the_marked_ring_to_its_views(app):
     app.processEvents()
     assert not window.auto_button.isEnabled()  # nothing marked yet
     window.scene = type("Scene", (), {"means": np.concatenate([np.zeros((3, 3)), np.full((3, 3), 20.)])})()
-    window.viewport.renderer = Renderer()
+    window.scene_renderer = Renderer()
+    window.viewport.renderer = window.scene_renderer
     window.viewport.segmenter = Segmenter()
     window.views.append(marked_view())
     window.view_list.addItem("View 1")

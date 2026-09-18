@@ -12,6 +12,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
 
 from gs_object_extraction.app.orbit import Orbit
+from gs_object_extraction.extract import TRIM
 from gs_object_extraction.app.views import MaskedView
 from gs_object_extraction.app.viewport import BACKGROUND
 from gs_object_extraction.app.window import MainWindow
@@ -32,9 +33,8 @@ CLEANED = np.array([True, True, False, False, False])
 
 
 class FakeRenderer:
-    n = 5
-
-    def __init__(self, *, blocked=False, fail=False, empty=False):
+    def __init__(self, *, blocked=False, fail=False, empty=False, n=5):
+        self.n = n
         self.blocked, self.fail, self.empty = blocked, fail, empty
         self.block_at = {1}  # lift calls that wait for the test
         self.started, self.release = threading.Event(), threading.Event()
@@ -121,6 +121,8 @@ def make_window(app, tmp_path, dialogs):
         window.scene = make_scene()
         window.source_path = tmp_path / f"source_{len(windows)}.ply"
         save_ply(window.scene, window.source_path)
+        window.scene_renderer = renderer
+        window.renderer_factory = lambda scene: FakeRenderer(n=len(scene))
         window.viewport.set_scene(renderer, Orbit(np.zeros(3), 3.))
         window.viewport.render_now()
         window.viewport._timer.stop()
@@ -162,18 +164,23 @@ def test_extract_cleans_hidden_fragments_previews_and_exports_full_gaussians(app
     window.viewport.add_point(10, 10, 1)
     assert not window.viewport.selecting and not window.viewport.points
 
+    # The object is drawn from Gaussians of its own, so the whole of it is on screen.
+    assert window.viewport.renderer is not renderer and len(window.object_scene) == int(CLEANED.sum())
+    np.testing.assert_array_equal(window.object_scene.ids, original.ids[CLEANED])
     for background, color in (("White", 255), ("Black", 0)):
         window.background_box.setCurrentText(background)
         window.viewport.render_now()
-        active, rgb = renderer.image_calls[-1]
-        np.testing.assert_array_equal(active, CLEANED)
+        object_renderer = window.viewport.renderer
+        active, rgb = object_renderer.image_calls[-1]
+        np.testing.assert_array_equal(active, np.ones(int(CLEANED.sum()), bool))
         assert rgb == (color / 255,) * 3
         np.testing.assert_array_equal(window.viewport.pixels[0, 0], [color] * 3)
         assert window.viewport.pick(0, 0) is not None
-        np.testing.assert_array_equal(renderer.depth_calls[-1], CLEANED)
+        np.testing.assert_array_equal(object_renderer.depth_calls[-1], np.ones(int(CLEANED.sum()), bool))
 
     window.preview_box.setCurrentText("Scene")
     window.viewport.render_now()
+    assert window.viewport.renderer is renderer and window.object_scene is None
     assert renderer.image_calls[-1] == (None, BACKGROUND)
     assert window.select_action.isEnabled() and not window.background_box.isEnabled()
     assert window.export_action.isEnabled()
@@ -188,6 +195,40 @@ def test_extract_cleans_hidden_fragments_previews_and_exports_full_gaussians(app
     for name, values in original.extras.items():
         np.testing.assert_array_equal(exported.extras[name], values[CLEANED])
         assert exported.extras[name].dtype == values.dtype
+    assert not dialogs
+
+
+class EdgeRenderer(FakeRenderer):
+    """The first Gaussian reaches past the masks, but not far enough to be dropped."""
+
+    def lift(self, camera, labels, *, active=None):
+        lifted = super().lift(camera, labels, active=active)
+        if active is not None:  # the cleaning round is where the off-mask shares come from
+            lifted.inside[0], lifted.outside[0] = .8, .2
+        return lifted
+
+
+def test_the_edge_trim_pulls_in_what_reaches_past_the_masks(app, make_window, tmp_path, dialogs):
+    window, _ = make_window(EdgeRenderer())
+    original = window.scene.copy()
+    extract_object(app, window)
+    np.testing.assert_array_equal(window.stages["cleaned"], CLEANED)
+    assert window.stages["off"][0] == pytest.approx(.2)
+
+    shown = window.object_scene  # the preview holds what the export will write
+    np.testing.assert_allclose(shown.scales[0], original.scales[0] * TRIM)
+    np.testing.assert_allclose(shown.scales[1], original.scales[1])
+    assert window.export_ply(tmp_path / "trimmed.ply")
+    exported = load_ply(tmp_path / "trimmed.ply")
+    np.testing.assert_allclose(exported.scales[0], original.scales[0] * TRIM, rtol=3e-7)
+    np.testing.assert_allclose(exported.scales[1], original.scales[1], rtol=3e-7)
+    np.testing.assert_array_equal(window.scene.scales, original.scales)  # the scene itself is untouched
+
+    window.trim_box.setValue(1.)
+    app.processEvents()
+    np.testing.assert_allclose(window.object_scene.scales, original.scales[CLEANED])
+    assert window.export_ply(tmp_path / "whole.ply")
+    np.testing.assert_allclose(load_ply(tmp_path / "whole.ply").scales, original.scales[CLEANED], rtol=3e-7)
     assert not dialogs
 
 

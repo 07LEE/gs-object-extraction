@@ -13,6 +13,7 @@ from .renderer import Lifted
 
 THRESHOLD, MIN_SUPPORT, ROUNDS, BAND = .65, .05, 2, 2
 OFF_MASK = .35  # drop a Gaussian once this much of its object-only contribution lands off-mask
+EDGE, TRIM = .05, .7  # a Gaussian reaching this far past the masks is shrunk by this much
 
 
 def lift_masks(renderer, views, *, band=0, active=None, on_view=None):
@@ -34,17 +35,35 @@ def select(lifted, threshold=THRESHOLD, min_support=MIN_SUPPORT):
 
 def prune_off_mask(selected, inside, outside, threshold=OFF_MASK):
     """Keep selected Gaussians unless most of their object-only contribution is off-mask."""
+    return selected & ~(off_share(inside, outside) > threshold)
+
+
+def off_share(inside, outside):
+    """Fraction of a Gaussian's object-only contribution that lands off-mask."""
     total = inside + outside
-    off = np.divide(outside, total, out=np.zeros_like(total, dtype=float), where=total > 0)
-    return selected & ~(off > threshold)
+    return np.divide(outside, total, out=np.zeros_like(total, dtype=float), where=total > 0)
+
+
+def trim_scales(off, *, threshold=EDGE, factor=TRIM):
+    """Scale factor per Gaussian: the ones reaching past the masks are shrunk, the rest kept.
+
+    The haze an object trails into empty space, the skirt under where it meets the
+    floor above all, is the tails of the Gaussians on its outline rather than any
+    Gaussian of its own. Pulling those tails in cleans the edge; the object's own
+    surface is left alone, which shrinking everything would thin.
+    """
+    if not 0 < factor <= 1:
+        raise ValueError("the trim factor must be above zero and at most one")
+    return np.where(np.asarray(off) > threshold, factor, 1.)
 
 
 def extract(renderer, views, *, threshold=THRESHOLD, min_support=MIN_SUPPORT, rounds=ROUNDS, band=BAND, off_threshold=OFF_MASK,
             progress=None):
-    """Return ``selected`` and ``cleaned`` boolean arrays over the scene.
+    """Return ``selected`` and ``cleaned`` boolean arrays over the scene, and the off-mask shares.
 
     ``progress(stage, done, total)`` runs after every lifted view; raising from
     it stops extraction. Views are retained so iterators work for every round.
+    ``off`` comes from the last cleaning round and is all zeros without one.
     """
     views = tuple(views)
     if not views:
@@ -61,10 +80,11 @@ def extract(renderer, views, *, threshold=THRESHOLD, min_support=MIN_SUPPORT, ro
             progress(stage, done, total)
 
     selected = select(lift_masks(renderer, views, on_view=report_view), threshold, min_support)
-    stages = {"selected": selected}
+    stages = {"selected": selected, "off": np.zeros(renderer.n)}
     for round_index in range(rounds):
         stage = f"Cleaning {round_index + 1}/{rounds}"
         own = lift_masks(renderer, views, band=band, active=selected, on_view=report_view)
+        stages["off"] = off_share(own.inside, own.outside)
         selected = prune_off_mask(selected, own.inside, own.outside, off_threshold)
     stages["cleaned"] = selected
     return stages

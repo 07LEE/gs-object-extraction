@@ -4,13 +4,14 @@ import os
 from pathlib import Path
 import stat
 import tempfile
+import numpy as np
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (QApplication, QComboBox, QDockWidget, QDoubleSpinBox, QFileDialog, QFormLayout,
                                QGroupBox, QLabel, QListWidget, QMainWindow, QMessageBox, QProgressBar, QPushButton,
                                QScrollArea, QToolButton, QVBoxLayout, QWidget)
 from ..ply import save_ply
-from ..extract import OFF_MASK
+from ..extract import OFF_MASK, TRIM, trim_scales
 from .autoviews import AutoMarkJob, VIEWS
 from .extraction import ExtractionJob
 from .loading import SceneLoadJob, SegmenterLoadJob
@@ -41,6 +42,9 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(TITLE)
         self.resize(1280, 800)
         self.scene = None
+        self.scene_renderer = None
+        self.object_scene = None  # the trimmed object on screen while previewing it
+        self.renderer_factory = None  # tests put a renderer of their own here
         self.source_path = None
         self.auto_up = None
         self.views = []
@@ -169,12 +173,19 @@ class MainWindow(QMainWindow):
         self.background_box = QComboBox()
         self.background_box.addItems(["White", "Black"])
         self.background_box.currentIndexChanged.connect(self.update_preview)
+        self.trim_box = QDoubleSpinBox()
+        self.trim_box.setRange(.5, 1.)
+        self.trim_box.setSingleStep(.05)
+        self.trim_box.setValue(TRIM)
+        self.trim_box.setToolTip("Pulls in the Gaussians that reach past the masks, which is what haloes the object; "
+                                 "1.00 leaves them as they are")
+        self.trim_box.valueChanged.connect(self.update_preview)
         self.export_button = QPushButton("Export object PLY...")
         self.export_button.clicked.connect(self.choose_export)
         for widget in (QLabel("Off-mask limit"), self.off_threshold_box,
                        self.extract_button, self.result_label, self.progress, self.cancel_button,
                        QLabel("Preview"), self.preview_box, QLabel("Object background"),
-                       self.background_box, self.export_button):
+                       self.background_box, QLabel("Edge trim"), self.trim_box, self.export_button):
             column.addWidget(widget)
         return box
 
@@ -187,7 +198,7 @@ class MainWindow(QMainWindow):
         """Start loading in the background; the scene is replaced only once it is read."""
         if self.extraction_job is not None or self.load_job is not None:
             return False
-        self.scene = self.source_path = None
+        self.scene = self.scene_renderer = self.source_path = None
         self.invalidate_result()
         self.views.clear()
         self.view_list.clear()
@@ -213,6 +224,7 @@ class MainWindow(QMainWindow):
         self.source_path = Path(self.load_job.path).resolve()
         self.count_label.setText(f"{len(scene.means):,}")
         self.auto_up = up
+        self.scene_renderer = renderer
         self.viewport.set_scene(renderer, orbit)
         self.statusBar().showMessage(f"Opened {self.source_path.name}: {len(scene.means):,} Gaussians")
 
@@ -250,9 +262,8 @@ class MainWindow(QMainWindow):
                 self.viewport.orbit = Orbit.framing(self.scene.means, up=self.up_vector())
             else:
                 # Fit the whole extracted object, including splat extents.
-                import numpy as np
-                active = self.viewport.active
-                means, scales = self.scene.means[active], self.scene.scales[active]
+                shown = self.object_scene if self.object_scene is not None else self.scene.subset(self.viewport.active)
+                means, scales = shown.means, shown.scales
                 centre = np.median(means, axis=0)
                 radius = float(np.max(np.linalg.norm(means - centre, axis=1) + 3 * scales.max(axis=1)))
                 aspect = self.viewport.width() / max(self.viewport.height(), 1)
@@ -335,7 +346,7 @@ class MainWindow(QMainWindow):
 
     def update_extraction_state(self, *_):
         busy = self.extraction_job is not None or self.auto_job is not None or self.load_job is not None
-        ready = self.scene is not None and self.viewport.renderer is not None and bool(self.views) and not busy
+        ready = self.scene is not None and self.scene_renderer is not None and bool(self.views) and not busy
         self.auto_button.setEnabled(ready and self.viewport.active is None)
         result = self.stages is not None and bool(self.stages["cleaned"].any())
         preview = self.viewport.active is not None
@@ -356,35 +367,63 @@ class MainWindow(QMainWindow):
 
     def invalidate_result(self):
         self.stages = None
+        self.object_scene = None
         self.preview_box.setCurrentIndex(0)
         if self.viewport.active is not None:
-            self.viewport.set_preview()
+            self.viewport.set_preview(renderer=self.scene_renderer)
         self.result_label.setText("Add views, then extract the object")
         self.update_extraction_state()
 
+    def trimmed_object(self):
+        """The object as it will be exported: the selected Gaussians, edges pulled in."""
+        if self.scene is None or self.stages is None or not self.stages["cleaned"].any():
+            return None
+        cleaned = self.stages["cleaned"]
+        object_scene = self.scene.subset(cleaned)
+        factors = trim_scales(self.stages["off"][cleaned], factor=self.trim_box.value())
+        object_scene.scales = object_scene.scales * factors[:, None]
+        return object_scene
+
+    def _renderer_for(self, scene):
+        if self.renderer_factory is not None:
+            return self.renderer_factory(scene)
+        from ..renderer import GraphdecoRenderer
+        return GraphdecoRenderer(scene)
+
     def update_preview(self, *_):
-        if self.extraction_job is not None:
+        """Show the scene, or the object on its own as the export will hold it."""
+        if self.extraction_job is not None or self.auto_job is not None:
             return
-        active = None
-        background = BACKGROUND
-        if self.preview_box.currentIndex() == 1 and self.stages is not None and self.stages["cleaned"].any():
-            active = self.stages["cleaned"]
-            background = (1., 1., 1.) if self.background_box.currentIndex() == 0 else (0., 0., 0.)
+        showing = (self.preview_box.currentIndex() == 1 and self.stages is not None
+                   and self.stages["cleaned"].any() and self.scene_renderer is not None)
+        if showing:
             self.set_selecting(False)
-        self.viewport.set_preview(active, background)
-        self.hint.setText(PREVIEW_HINT if active is not None else
+            object_scene = self.trimmed_object()
+            try:
+                renderer = self._renderer_for(object_scene)
+            except Exception as exc:  # a scene that fits the GPU can still fail to make room for a copy
+                self.statusBar().showMessage(f"Cannot show the object on its own: {exc}")
+                showing = False
+            else:
+                self.object_scene = object_scene
+                background = (1., 1., 1.) if self.background_box.currentIndex() == 0 else (0., 0., 0.)
+                self.viewport.set_preview(np.ones(len(object_scene), bool), background, renderer=renderer)
+        if not showing:
+            self.object_scene = None
+            self.viewport.set_preview(renderer=self.scene_renderer)
+        self.hint.setText(PREVIEW_HINT if self.viewport.active is not None else
                           SELECT_HINT if self.viewport.selecting else NAVIGATE_HINT)
         self.update_extraction_state()
 
     def start_auto_mark(self):
         """Mark a ring of views around the object, using the views marked so far to find it."""
-        if self.extraction_job is not None or self.auto_job is not None or not self.views:
+        if self.extraction_job is not None or self.auto_job is not None or not self.views or self.scene_renderer is None:
             return
         self.set_selecting(False)
         self.viewport.clear_prompts()
         self.viewport.set_suspended(True)  # the job needs the renderer and SAM2 to itself
         camera = self.views[0].camera
-        job = AutoMarkJob(self.viewport.renderer, self.viewport.segmenter, self.scene.means, tuple(self.views),
+        job = AutoMarkJob(self.scene_renderer, self.viewport.segmenter, self.scene.means, tuple(self.views),
                           self.up_vector(), (camera.width, camera.height), self)
         self.auto_job = job
         job.progress.connect(self.auto_mark_progress)
@@ -433,12 +472,12 @@ class MainWindow(QMainWindow):
             self.close()
 
     def start_extraction(self):
-        if self.extraction_job is not None or self.scene is None or self.viewport.renderer is None or not self.views:
+        if self.extraction_job is not None or self.scene is None or self.scene_renderer is None or not self.views:
             return
         self.set_selecting(False)
         self.viewport.clear_prompts()
         self.viewport.set_suspended(True)
-        job = ExtractionJob(self.viewport.renderer, tuple(self.views), self,
+        job = ExtractionJob(self.scene_renderer, tuple(self.views), self,
                             off_threshold=self.off_threshold_box.value())
         self.extraction_job = job
         job.progress.connect(self.extraction_progress)
@@ -524,7 +563,7 @@ class MainWindow(QMainWindow):
                 raise ValueError("Choose a different file from the source scene.")
             with tempfile.NamedTemporaryFile(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent, delete=False) as stream:
                 temporary = Path(stream.name)
-            save_ply(self.scene.subset(self.stages["cleaned"]), temporary)
+            save_ply(self.trimmed_object(), temporary)
             os.chmod(temporary, _file_mode(path))  # the temporary file is private (0600) until now
             os.replace(temporary, path)
         except Exception as exc:

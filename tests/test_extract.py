@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 import numpy as np
-from gs_object_extraction.extract import extract, prune_off_mask, score, select
+import pytest
+from gs_object_extraction.extract import extract, prune_off_mask, score, select, trim_scales
 from gs_object_extraction.masks import band_labels
 from gs_object_extraction.renderer import Lifted
 
@@ -119,3 +120,25 @@ def test_off_threshold_decides_how_much_spill_a_gaussian_may_keep():
     np.testing.assert_array_equal(extract(renderer, views)["selected"], [True, True, False])
     np.testing.assert_array_equal(extract(renderer, views)["cleaned"], [True, False, False])
     np.testing.assert_array_equal(extract(renderer, views, off_threshold=.5)["cleaned"], [True, True, False])
+
+
+def test_trim_scales_only_shrinks_what_reaches_past_the_masks():
+    off = np.array([0., .04, .06, .5])
+    np.testing.assert_allclose(trim_scales(off, threshold=.05, factor=.7), [1., 1., .7, .7])
+    np.testing.assert_allclose(trim_scales(off, factor=1.), 1.)  # a factor of one changes nothing
+    for bad in (0., -1., 1.5):
+        with pytest.raises(ValueError):
+            trim_scales(off, factor=bad)
+
+
+def test_extract_reports_how_far_each_gaussian_reaches_past_the_masks():
+    # 0 sits well inside, 1 spills a third of itself past the mask, 2 is background.
+    renderer = ChainRenderer([{5: 1., 6: 1.}, {7: 1., 8: 1., 10: 1.}, {1: 1., 2: 1.}], {})
+    views = [(None, WIDE_MASK)]
+    stages = extract(renderer, views, band=0)
+    off = stages["off"]
+    assert off.shape == (renderer.n,) and np.all((off >= 0) & (off <= 1))
+    np.testing.assert_allclose(off[:2], [0., 1 / 3])
+    np.testing.assert_array_equal(stages["cleaned"], [True, True, False])  # a third off-mask is within the limit
+    np.testing.assert_array_equal(trim_scales(off) < 1, [False, True, False])
+    np.testing.assert_array_equal(extract(renderer, views, rounds=0)["off"], np.zeros(renderer.n))

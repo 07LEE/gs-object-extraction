@@ -39,7 +39,7 @@ gs-object-extraction-gui path/to/point_cloud.ply
 | Backspace, Esc, Enter | Undo a point, clear the points, add the view |
 | Ctrl+E, Ctrl+Shift+S | Extract the object, export it as a PLY |
 
-Mark the object all the way around, about sixteen views, with the camera kept low; steep views drag in the ground behind the object. Mark around the object does that for you from the views you have marked already: it is experimental, so look at what it marked, and press it again if the object still comes out cut short. Two limits stay: the underside no view ever saw comes out empty, and thin structures such as leaves come out slightly thinned at the edges.
+Mark the object all the way around, about sixteen views, with the camera kept low; steep views drag in the ground behind the object. Mark around the object does that for you from the views you have marked already: it is experimental, so look at what it marked, and press it again if the object still comes out cut short. Edge trim pulls in the Gaussians that reach past the masks, which is what leaves a halo around the object; set it to 1.00 to keep them as they are. Two limits stay: the underside no view ever saw comes out empty, and thin structures such as leaves come out slightly thinned at the edges.
 
 ## Tests
 

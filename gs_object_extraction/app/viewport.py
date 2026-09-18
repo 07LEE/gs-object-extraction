@@ -63,8 +63,14 @@ class Viewport(QWidget):
         self.active, self.background = None, BACKGROUND
         self.clear_prompts()
 
-    def set_preview(self, active=None, background=BACKGROUND):
-        """Render and pick only the selection while keeping the current camera."""
+    def set_preview(self, active=None, background=BACKGROUND, renderer=None):
+        """Render and pick only the selection while keeping the current camera.
+
+        ``renderer`` swaps in another renderer, which is how the object is shown
+        on its own: it is drawn from Gaussians of its own, not from the scene.
+        """
+        if renderer is not None:
+            self.renderer = renderer
         if active is not None:
             active = np.asarray(active)
             if self.renderer is None or active.shape != (self.renderer.n,) or active.dtype != np.bool_:
