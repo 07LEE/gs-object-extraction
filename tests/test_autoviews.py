@@ -7,7 +7,7 @@ import pytest
 pytest.importorskip("PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
-from gs_object_extraction.app.autoviews import (AutoMarkJob, DISTANCE, MAX_FRAME, MIN_PIXELS, NEAR, VIEWS,
+from gs_object_extraction.app.autoviews import (AutoMarkJob, DISTANCE, MIN_AGREE, MIN_PIXELS, NEAR, VIEWS,
                                                 best_candidate, inner_part, object_frame, prompt_points, ring,
                                                 surface_points, usable)
 from gs_object_extraction.app.orbit import Orbit
@@ -99,19 +99,22 @@ def test_prompts_survive_a_thin_silhouette():
 def test_the_candidate_closest_to_the_silhouette_wins():
     coverage = disk(SIZE[::-1], (24, 32), 10)
     candidates = [disk(SIZE[::-1], (24, 32), 3), disk(SIZE[::-1], (24, 32), 10), np.ones(SIZE[::-1], bool)]
-    mask, overlap = best_candidate(candidates, coverage)
-    assert np.array_equal(mask, candidates[1]) and overlap > .9
+    mask, sits_on = best_candidate(candidates, coverage)
+    assert np.array_equal(mask, candidates[1]) and sits_on > .9  # the object, not a piece of it or the frame
+    piece, sits_on = best_candidate([candidates[0]], coverage)
+    assert sits_on == 1.  # a piece of the object still sits squarely on it
+    beside, sits_on = best_candidate([disk(SIZE[::-1], (10, 8), 6)], coverage)
+    assert sits_on == 0.  # this one is somewhere else entirely
 
 
-def test_masks_that_miss_the_object_or_run_off_are_refused():
-    coverage = disk(SIZE[::-1], (24, 32), 10)
-    assert usable(coverage, coverage)
-    assert not usable(None, coverage)
-    assert not usable(np.zeros(SIZE[::-1], bool), coverage)
-    assert not usable(disk(SIZE[::-1], (24, 32), 2), coverage)  # covers too little of it
-    assert not usable(np.ones(SIZE[::-1], bool), coverage)  # swallows the frame
-    grown = disk(SIZE[::-1], (24, 32), 10) | disk(SIZE[::-1], (10, 10), 12) | disk(SIZE[::-1], (40, 55), 12)
-    assert grown.mean() < MAX_FRAME and not usable(grown, coverage)  # runs far past the outline
+def test_masks_that_sit_elsewhere_or_swallow_the_frame_are_refused():
+    silhouette = disk(SIZE[::-1], (24, 32), 10)
+    assert usable(silhouette, 1.)
+    assert not usable(None, 1.)
+    assert not usable(np.zeros(SIZE[::-1], bool), 1.)
+    assert not usable(np.ones(SIZE[::-1], bool), 1.)  # the whole frame is not an object
+    assert not usable(silhouette, MIN_AGREE - .01)  # mostly somewhere else: the sky beside it
+    assert usable(disk(SIZE[::-1], (24, 32), 3), 1.)  # a piece of the object is still worth marking
 
 
 class Renderer:
@@ -119,8 +122,8 @@ class Renderer:
 
     n = 6  # the first three Gaussians are the object
 
-    def __init__(self, *, fail_from=None):
-        self.fail_from = fail_from
+    def __init__(self, *, fail_from=None, hidden_by=0):
+        self.fail_from, self.hidden_by = fail_from, hidden_by
         self.lifts = self.images = 0
 
     def lift(self, camera, labels, *, active=None):
@@ -131,7 +134,9 @@ class Renderer:
         return Lifted(inside, outside, inside + outside)
 
     def depth_image(self, camera, *, active=None):
-        return np.full((camera.height, camera.width), 4.), np.ones((camera.height, camera.width))
+        shape = (camera.height, camera.width)
+        drawn = np.ones(shape) if active is None else (self.alpha_image(camera, active=active) > .5).astype(float)
+        return np.full(shape, 4.), drawn
 
     def alpha_image(self, camera, *, active=None):
         if self.fail_from is not None and self.images >= self.fail_from:
@@ -140,7 +145,10 @@ class Renderer:
 
     def render_image(self, camera, *, active=None, background=(0, 0, 0)):
         self.images += 1
-        return np.zeros((camera.height, camera.width, 3), np.uint8)
+        pixels = np.zeros((camera.height, camera.width, 3), np.uint8)
+        if active is None:  # the scene draws the object in its own colour, plus whatever hides it
+            pixels[...] = self.hidden_by
+        return pixels
 
 
 class Segmenter:

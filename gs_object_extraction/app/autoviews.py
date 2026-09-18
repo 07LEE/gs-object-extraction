@@ -18,9 +18,8 @@ VIEWS = 16
 PITCH = np.deg2rad(12.)
 DISTANCE = 3.2  # times the object's radius
 MIN_PIXELS = 200  # a silhouette smaller than this is not worth marking
-MIN_COVER = .3  # the mask has to cover this much of where the object landed
-MAX_FRAME = .6  # ... must not swallow the frame
-MAX_GROWTH = 3.  # ... and must not run far past the object's own outline
+MIN_AGREE = .25  # this much of a mask has to sit on the object for the view to be believed
+MAX_FRAME = .6  # ... and must not swallow the frame
 POINTS = 3  # clicks spread over the silhouette
 NEAR = 1.5  # keep the selection within this many object radii when looking for the object on screen
 DEEP = 8  # click this far inside the outline where the silhouette is wide enough
@@ -98,18 +97,29 @@ def prompt_points(coverage, count=POINTS):
 
 
 def best_candidate(masks, coverage):
-    """The candidate that agrees most with where the object landed, and how much it does."""
+    """The candidate that agrees most with where the object landed, and how squarely it sits on it.
+
+    The candidate is chosen by overlap both ways, so a mask of one leaf does not win
+    over a mask of the plant. What comes back is how much of the chosen mask lands on
+    the object: a mask of part of the object still says everything around it is not
+    the object, and is worth keeping, while a mask of the sky beside it is not.
+    """
     overlaps = [(mask & coverage).sum() / max((mask | coverage).sum(), 1) for mask in masks]
     best = int(np.argmax(overlaps))
-    return masks[best], overlaps[best]
+    mask = masks[best]
+    return mask, float((mask & coverage).sum() / max(mask.sum(), 1))
 
 
-def usable(mask, coverage):
-    """Keep a mask that covers where the object landed without running off into the scene."""
-    if mask is None or not mask.any():
-        return False
-    return ((mask & coverage).sum() >= MIN_COVER * coverage.sum() and mask.mean() <= MAX_FRAME
-            and mask.sum() <= MAX_GROWTH * coverage.sum())
+def usable(mask, sits_on):
+    """Believe a mask that sits on the object, and does not swallow the frame.
+
+    A ring passes through places the capture never covered and behind other objects.
+    The renders there are a smear, and a promptable segmenter answers a click in them
+    with the sky or the ground, which is what this rejects. A mask of only part of the
+    object is kept: it still says everything around it is not the object, and dropping
+    such views measurably cost more than it saved.
+    """
+    return mask is not None and mask.any() and sits_on >= MIN_AGREE and mask.mean() <= MAX_FRAME
 
 
 class AutoMarkJob(QThread):
@@ -151,18 +161,18 @@ class AutoMarkJob(QThread):
                     self.cancelled.emit()
                     return
                 camera = orbit.camera(width, height)
-                coverage = self.renderer.alpha_image(camera, active=near) > .5
-                if coverage.sum() >= MIN_PIXELS:
-                    points = prompt_points(coverage)
+                silhouette = np.clip(self.renderer.alpha_image(camera, active=near), 0, 1) > .5
+                if silhouette.sum() < MIN_PIXELS:
+                    skipped += 1
+                else:
+                    points = prompt_points(silhouette)
                     masks, _ = self.segmenter.candidates(self.renderer.render_image(camera, background=BACKGROUND),
                                                          ("auto", index), points, [1] * len(points), several=True)
-                    mask, _ = best_candidate(masks, coverage)
-                    if usable(mask, coverage):
+                    mask, sits_on = best_candidate(masks, silhouette)
+                    if usable(mask, sits_on):
                         marked.append(MaskedView(camera, mask, tuple(points), (1,) * len(points)))
                     else:
                         skipped += 1
-                else:
-                    skipped += 1
                 self.progress.emit(index + 1, self.count)
         except Exception as exc:
             self.failed.emit(str(exc))
