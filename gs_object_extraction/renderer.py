@@ -7,8 +7,10 @@ sum_p T_i(p) alpha_i(p) over the labelled pixels, so one backward pass gives
 every Gaussian's contribution without an N x H x W tensor. Nothing is optimised.
 """
 
+import contextlib
 from dataclasses import dataclass
 import inspect
+import threading
 import numpy as np
 
 
@@ -57,8 +59,36 @@ class Lifted:
         return self
 
 
-class GraphdecoRenderer:
+class Exclusive:
+    """One caller at a time on the GPU buffers a renderer holds.
+
+    The buffers are read-only while drawing, but a background job and the window reach
+    for the same renderer, and they share its screen-space buffer and the default CUDA
+    stream. Calls are handed out one at a time; the window asks without blocking, so
+    its event loop never queues behind a lift.
+    """
+
+    def __init__(self):
+        self._lock = threading.RLock()
+
+    @contextlib.contextmanager
+    def held(self, *, blocking=True):
+        """Hold the renderer across a series of calls; yields whether it was obtained.
+
+        ``blocking=False`` gives up at once instead of queueing behind a lift, which
+        takes about 70 ms: the window skips that frame rather than stall its event loop.
+        """
+        obtained = self._lock.acquire(blocking)
+        try:
+            yield obtained
+        finally:
+            if obtained:
+                self._lock.release()
+
+
+class GraphdecoRenderer(Exclusive):
     def __init__(self, scene):
+        super().__init__()
         try:
             import torch
             import diff_gaussian_rasterization as dgr
@@ -86,7 +116,7 @@ class GraphdecoRenderer:
         scales = np.asarray(scales, dtype=np.float32)
         if scales.shape != (self.n, 3) or not np.isfinite(scales).all() or np.any(scales <= 0):
             raise ValueError("scales must be positive finite N x 3")
-        with self.torch.no_grad():
+        with self._lock, self.torch.no_grad():
             self.scales.copy_(self.torch.as_tensor(np.ascontiguousarray(scales)))
 
     def _settings(self, camera, background):
@@ -117,7 +147,7 @@ class GraphdecoRenderer:
         features = np.asarray(features, dtype=float)
         if features.shape != (self.n, 3) or not np.isfinite(features).all():
             raise ValueError("features must be finite N x 3")
-        with self.torch.no_grad():
+        with self._lock, self.torch.no_grad():
             result = self._rasterize(camera, features=self._tensor(features), active=active, background=background)
         return result[0].permute(1, 2, 0).cpu().numpy()
 
@@ -127,25 +157,25 @@ class GraphdecoRenderer:
 
     def alpha_image(self, camera, *, active=None):
         """Coverage of the drawn Gaussians, H x W; where the object lands on screen."""
-        with self.torch.no_grad():
+        with self._lock, self.torch.no_grad():
             return self._alpha(camera, active).cpu().numpy()
 
     def render(self, camera, *, active=None, background=(0, 0, 0)):
         """RGB over ``background`` and alpha; ``active`` renders only those Gaussians."""
-        with self.torch.no_grad():
+        with self._lock, self.torch.no_grad():
             rgb = self._rasterize(camera, active=active, background=background)[0].permute(1, 2, 0).cpu().numpy()
             alpha = self._alpha(camera, active).cpu().numpy()
         return Frame(rgb, alpha)
 
     def render_image(self, camera, *, active=None, background=(0, 0, 0)):
         """8-bit RGB (H x W x 3) for display, converted on the GPU."""
-        with self.torch.no_grad():
+        with self._lock, self.torch.no_grad():
             color = self._rasterize(camera, active=active, background=background)[0]
             return (color.clamp(0, 1) * 255).round().to(self.torch.uint8).permute(1, 2, 0).contiguous().cpu().numpy()
 
     def depth_image(self, camera, *, active=None):
         """Camera-space depth (alpha-weighted mean over the drawn Gaussians) and alpha, both H x W."""
-        with self.torch.no_grad():
+        with self._lock, self.torch.no_grad():
             w2c = self._tensor(camera.world_to_camera)
             z = self.means @ w2c[2, :3] + w2c[2, 3]
             weighted = self._rasterize(camera, features=z[:, None].expand(-1, 3).contiguous(), active=active)[0][0]
@@ -161,7 +191,7 @@ class GraphdecoRenderer:
         labels = validate_labels(labels, (camera.height, camera.width))
         torch = self.torch
         features = torch.zeros_like(self.means, requires_grad=True)
-        with torch.enable_grad():
+        with self._lock, torch.enable_grad():
             image = self._rasterize(camera, features=features, active=active)[0]
             grad_pixels = self._tensor(np.stack((labels == 1, labels == 0, np.ones_like(labels)), axis=0))
             accumulated, = torch.autograd.grad(image, features, grad_outputs=grad_pixels)

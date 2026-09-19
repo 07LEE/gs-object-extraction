@@ -2,7 +2,7 @@ import os
 import numpy as np
 import pytest
 from gs_object_extraction.camera import Camera
-from gs_object_extraction.renderer import projection_matrix
+from gs_object_extraction.renderer import Exclusive, projection_matrix
 from gs_object_extraction.scene import GaussianScene
 
 cuda = pytest.mark.skipif(os.environ.get("GS_OBJECT_EXTRACTION_TEST_CUDA") != "1", reason="set GS_OBJECT_EXTRACTION_TEST_CUDA=1 in the GPU environment")
@@ -14,6 +14,36 @@ def test_projection_maps_arbitrary_intrinsics_to_pixel_coordinates():
     clip = xyz @ projection_matrix(camera).T
     uv = ((clip[:, :2] / clip[:, 3:4] + 1) * [camera.width, camera.height] - 1) / 2
     np.testing.assert_allclose(uv, xyz[:, :2] / xyz[:, 2:3] * [camera.fx, camera.fy] + [camera.cx, camera.cy], atol=2e-6)
+
+
+def test_a_held_renderer_turns_away_a_caller_that_will_not_wait():
+    """The window asks without blocking, so its event loop never queues behind a lift."""
+    import threading
+    exclusive = Exclusive()
+    taken, done, refused = threading.Event(), threading.Event(), []
+
+    def hold():
+        with exclusive.held() as obtained:
+            assert obtained
+            taken.set()
+            assert done.wait(5)
+
+    holder = threading.Thread(target=hold)
+    holder.start()
+    assert taken.wait(5)
+    with exclusive.held(blocking=False) as obtained:
+        refused.append(obtained)
+    done.set()
+    holder.join(5)
+    with exclusive.held(blocking=False) as obtained:  # free again once the holder is gone
+        refused.append(obtained)
+    assert refused == [False, True]
+
+
+def test_holding_a_renderer_nests_so_its_own_calls_still_work():
+    exclusive = Exclusive()
+    with exclusive.held() as outer, exclusive.held(blocking=False) as inner:
+        assert outer and inner
 
 
 def three_gaussians():

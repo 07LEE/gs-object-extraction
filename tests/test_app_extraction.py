@@ -9,6 +9,8 @@ import pytest
 
 pytest.importorskip("PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+from PySide6.QtCore import QEvent, QPointF, Qt
+from PySide6.QtGui import QMouseEvent
 from PySide6.QtWidgets import QApplication
 
 from gs_object_extraction.app.orbit import Orbit
@@ -18,7 +20,7 @@ from gs_object_extraction.app.viewport import BACKGROUND
 from gs_object_extraction.app.window import MainWindow
 from gs_object_extraction.camera import Camera
 from gs_object_extraction.ply import load_ply, save_ply
-from gs_object_extraction.renderer import Lifted
+from gs_object_extraction.renderer import Exclusive, Lifted
 from gs_object_extraction.scene import GaussianScene
 
 
@@ -32,8 +34,9 @@ SELECTED = np.array([True, True, False, True, False])
 CLEANED = np.array([True, True, False, False, False])
 
 
-class FakeRenderer:
+class FakeRenderer(Exclusive):
     def __init__(self, *, blocked=False, fail=False, empty=False, n=5):
+        super().__init__()
         self.n = n
         self.blocked, self.fail, self.empty = blocked, fail, empty
         self.block_at = {1}  # lift calls that wait for the test
@@ -41,6 +44,10 @@ class FakeRenderer:
         self.lift_threads, self.image_calls, self.depth_calls = [], [], []
 
     def lift(self, camera, labels, *, active=None):
+        with self.held():  # as the real renderer does, so the window sees it busy
+            return self._lift(camera, labels, active)
+
+    def _lift(self, camera, labels, active):
         self.lift_threads.append(threading.get_ident())
         if self.blocked and len(self.lift_threads) in self.block_at:
             self.started.set()
@@ -73,6 +80,15 @@ class FakeRenderer:
         self.depth_calls.append(None if active is None else active.copy())
         shape = (camera.height, camera.width)
         return np.full(shape, 2.), np.ones(shape)
+
+
+def drag(view, start, end, button):
+    def mouse(kind, x, y, buttons):
+        return QMouseEvent(kind, QPointF(x, y), QPointF(x, y), button, buttons, Qt.NoModifier)
+
+    view.mousePressEvent(mouse(QEvent.MouseButtonPress, *start, button))
+    view.mouseMoveEvent(mouse(QEvent.MouseMove, *end, button))
+    view.mouseReleaseEvent(mouse(QEvent.MouseButtonRelease, *end, Qt.NoButton))
 
 
 def make_scene():
@@ -399,14 +415,15 @@ def test_confirmed_view_or_scene_changes_invalidate_results(app, make_window, mo
     assert not (tmp_path / "stale.ply").exists()
 
 
-def test_extracting_locks_renderer_and_inputs_then_cancellation_restores_controls(app, make_window, tmp_path, dialogs):
+def test_extracting_locks_the_inputs_but_leaves_the_view_to_look_at(app, make_window, tmp_path, dialogs):
+    """A job owns the renderer per call, not for its whole run, so the view stays live while it works."""
     window, renderer = make_window(FakeRenderer(blocked=True))
     window.start_extraction()
     wait_until(app, renderer.started.is_set)
     job = window.extraction_job
     frame_count = len(renderer.image_calls)
     original_eye = window.viewport.orbit.eye.copy()
-    assert window.viewport.suspended and not window.viewport.isEnabled()
+    assert window.viewport.suspended and window.viewport.isEnabled()  # suspended marking, not a dead widget
     assert not window.open_action.isEnabled() and not window.extract_action.isEnabled()
     assert not window.scene_box.isEnabled() and not window.view_list.isEnabled()
     assert not window.add_view_action.isEnabled() and not window.select_action.isEnabled()
@@ -419,11 +436,16 @@ def test_extracting_locks_renderer_and_inputs_then_cancellation_restores_control
     window.set_up("+Z")
     window.set_selecting(True)
     window.viewport.add_point(10, 10, 1)
-    window.viewport.render_now()
-    assert window.viewport.pick(0, 0) is None
-    assert len(window.views) == 1 and not window.viewport.points
+    assert len(window.views) == 1 and not window.viewport.points  # marking is what the job rules out
     np.testing.assert_array_equal(window.viewport.orbit.eye, original_eye)
-    assert len(renderer.image_calls) == frame_count and not renderer.depth_calls
+    # The lift the job is in holds the renderer, so the frame is skipped instead of queueing behind it.
+    window.viewport.render_now()
+    assert len(renderer.image_calls) == frame_count and window.viewport.pick(0, 0) is None
+    assert not renderer.depth_calls
+    # A drag still turns the camera; the frame it asks for waits for the renderer rather than the job.
+    drag(window.viewport, (60, 40), (90, 40), Qt.LeftButton)
+    assert not np.array_equal(window.viewport.orbit.eye, original_eye)
+    assert len(renderer.image_calls) == frame_count
     window.cancel_extraction()
     assert not window.cancel_button.isEnabled()
     renderer.release.set()
@@ -431,6 +453,7 @@ def test_extracting_locks_renderer_and_inputs_then_cancellation_restores_control
     assert window.stages is None and not window.viewport.suspended and window.viewport.isEnabled()
     assert window.open_action.isEnabled() and window.extract_action.isEnabled()
     assert not window.progress.isVisible() and not window.cancel_button.isVisible()
+    wait_until(app, lambda: len(renderer.image_calls) > frame_count)  # the dragged view arrives
     assert len(renderer.lift_threads) == 1 and not dialogs
 
 

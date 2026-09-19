@@ -10,8 +10,9 @@ from PySide6.QtCore import QEvent, QPointF, Qt, QTimer
 from PySide6.QtGui import QColor, QMouseEvent
 from PySide6.QtWidgets import QApplication
 from gs_object_extraction.app.orbit import Orbit
-from gs_object_extraction.app.viewport import BACKGROUND
+from gs_object_extraction.app.viewport import BACKGROUND, BUSY_RETRY_MS
 from gs_object_extraction.app.window import MainWindow, TITLE
+from gs_object_extraction.renderer import Exclusive
 from gs_object_extraction.ply import save_ply
 from gs_object_extraction.scene import GaussianScene
 
@@ -299,10 +300,11 @@ def test_sideways_wheel_does_not_drop_the_points(app):
     assert view.points == [] and view.orbit.distance < distance
 
 
-class FlakyRenderer:
+class FlakyRenderer(Exclusive):
     n = 10
 
     def __init__(self):
+        super().__init__()
         self.fail = False
 
     def render_image(self, camera, active=None, background=(0, 0, 0)):
@@ -379,7 +381,7 @@ def test_clicks_and_picks_map_widget_points_to_device_pixels_on_hidpi(app):
     window.add_view()
     assert window.views[0].mask.shape == (2 * h, 2 * w)
 
-    class OneSolidPixel:
+    class OneSolidPixel(Exclusive):
         def depth_image(self, camera, active=None):
             alpha = np.zeros((camera.height, camera.width))
             alpha[160, 200] = 1
@@ -404,11 +406,12 @@ class RecordingPredictor:
         return masks, np.linspace(.5, .9, count), None
 
 
-class ShiftingRenderer:
+class ShiftingRenderer(Exclusive):
     """Each frame is a different grey, so a stale embedding is detectable."""
     n = 10
 
     def __init__(self):
+        super().__init__()
         self.frames = 0
 
     def render_image(self, camera, active=None, background=(0, 0, 0)):
@@ -418,6 +421,33 @@ class ShiftingRenderer:
     def depth_image(self, camera, *, active=None):
         shape = (camera.height, camera.width)
         return np.full(shape, 2.), np.ones(shape)
+
+
+def test_a_busy_renderer_skips_the_frame_and_the_viewport_asks_again(app):
+    """A job holds the renderer per call; the window keeps the frame it has instead of stalling."""
+    import threading
+    window, view = ready_window(FakeSegmenter())
+    renderer = ShiftingRenderer()
+    view.renderer = renderer
+    before, frames = view.frame, renderer.frames
+    taken, done = threading.Event(), threading.Event()
+
+    def hold():
+        with renderer.held():
+            taken.set()
+            assert done.wait(5)
+
+    holder = threading.Thread(target=hold)
+    holder.start()
+    assert taken.wait(5)
+    view._timer.stop()
+    view.render_now()
+    assert view.frame == before and renderer.frames == frames  # nothing drawn
+    assert view._timer.isActive() and view._timer.interval() == BUSY_RETRY_MS  # and it will try again
+    done.set()
+    holder.join(5)
+    view.render_now()
+    assert view.frame == before + 1 and renderer.frames == frames + 1
 
 
 def test_each_new_frame_gets_a_new_sam2_embedding(app):

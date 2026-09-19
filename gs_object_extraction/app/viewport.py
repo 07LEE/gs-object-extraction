@@ -17,6 +17,7 @@ from .orbit import unproject
 BACKGROUND = (.13, .13, .14)
 MIN_PICK_ALPHA = .5
 CLICK_SLOP = 4  # pixels a press may move and still count as a click
+BUSY_RETRY_MS = 16  # wait this long before asking again for a renderer a background job is using
 MASK_RGBA = (255, 140, 0, 110)
 PARTIAL = 2.  # a candidate this much larger than the mask means the click probably caught a part
 POINT_COLORS = {1: QColor(60, 220, 90), 0: QColor(235, 60, 60)}
@@ -82,19 +83,20 @@ class Viewport(QWidget):
         self.view_changed()
 
     def set_suspended(self, on):
-        """Give extraction exclusive use of the renderer until its thread finishes."""
+        """A background job is running: the view can still be moved, but not marked.
+
+        The job and this widget share one renderer, which hands out exclusive use per
+        call, so the view keeps drawing between the job's own renders. What stops is
+        marking: the job reads the views marked so far and appends to them.
+        """
         self.suspended = bool(on)
         self._press, self._dragging = None, False
-        self.setEnabled(not on)
-        if on:
-            self._timer.stop()
-        else:
-            self.request()
+        self.clear_prompts()
+        self.request()
 
-    def request(self):
+    def request(self, delay=0):
         """Render on the next event-loop turn; repeated requests collapse into one frame."""
-        if not self.suspended:
-            self._timer.start()
+        self._timer.start(delay)
 
     def view_changed(self):
         """The camera or the widget size changed: prompts on the old frame no longer apply."""
@@ -103,14 +105,18 @@ class Viewport(QWidget):
         self.request()
 
     def render_now(self):
-        if self.suspended or self.renderer is None or self.orbit is None:
+        if self.renderer is None or self.orbit is None:
             return
         ratio = self.devicePixelRatioF()
         width, height = max(int(self.width() * ratio), 1), max(int(self.height() * ratio), 1)
         start = time.perf_counter()
         camera = self.orbit.camera(width, height)
         try:
-            pixels = self.renderer.render_image(camera, active=self.active, background=self.background)
+            with self.renderer.held(blocking=False) as free:
+                if not free:  # a job has the renderer; keep the frame on screen and ask again
+                    self.request(BUSY_RETRY_MS)
+                    return
+                pixels = self.renderer.render_image(camera, active=self.active, background=self.background)
         except Exception as exc:  # e.g. CUDA out of memory: show why instead of a stale frame
             self.image = self.pixels = self.camera = None
             self.render_error = str(exc)
@@ -126,9 +132,12 @@ class Viewport(QWidget):
 
     def pick(self, x, y):
         """World point under widget position (x, y), or None where nothing solid is drawn."""
-        if self.suspended or self.renderer is None or self.camera is None:
+        if self.renderer is None or self.camera is None:
             return None
-        depth, alpha = self.renderer.depth_image(self.camera, active=self.active)
+        with self.renderer.held(blocking=False) as free:
+            if not free:  # a job has the renderer; a double-click is not worth waiting for
+                return None
+            depth, alpha = self.renderer.depth_image(self.camera, active=self.active)
         px, py = self._to_pixels(x, y)
         if alpha[py, px] < MIN_PICK_ALPHA:
             return None

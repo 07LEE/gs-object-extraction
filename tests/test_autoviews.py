@@ -13,6 +13,7 @@ from gs_object_extraction.app.autoviews import (AutoMarkJob, DISTANCE, MIN_AGREE
 from gs_object_extraction.app.orbit import Orbit
 from gs_object_extraction.app.views import MaskedView
 from gs_object_extraction.camera import Camera
+from gs_object_extraction.renderer import Exclusive
 
 SIZE = (64, 48)
 CAMERA = Camera.look_at((0, 0, -4), (0, 0, 0), width=SIZE[0], height=SIZE[1])
@@ -117,12 +118,13 @@ def test_masks_that_sit_elsewhere_or_swallow_the_frame_are_refused():
     assert usable(disk(SIZE[::-1], (24, 32), 3), 1.)  # a piece of the object is still worth marking
 
 
-class Renderer:
+class Renderer(Exclusive):
     """Draws the object as a disk, and everything else as the wall behind it."""
 
     n = 6  # the first three Gaussians are the object
 
     def __init__(self, *, fail_from=None, hidden_by=0):
+        super().__init__()
         self.fail_from, self.hidden_by = fail_from, hidden_by
         self.lifts = self.images = 0
 
@@ -241,6 +243,7 @@ def test_the_window_adds_the_marked_ring_to_its_views(app):
 
     window.start_auto_mark()
     assert window.auto_job is not None and window.viewport.suspended
+    assert window.viewport.isEnabled()  # marking is suspended, looking around is not
     assert not window.auto_button.isEnabled() and not window.extract_action.isEnabled()
     deadline = time.monotonic() + 10
     while window.auto_job is not None and time.monotonic() < deadline:
