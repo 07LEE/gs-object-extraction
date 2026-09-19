@@ -18,6 +18,7 @@ BACKGROUND = (.13, .13, .14)
 MIN_PICK_ALPHA = .5
 CLICK_SLOP = 4  # pixels a press may move and still count as a click
 MASK_RGBA = (255, 140, 0, 110)
+PARTIAL = 2.  # a candidate this much larger than the mask means the click probably caught a part
 POINT_COLORS = {1: QColor(60, 220, 90), 0: QColor(235, 60, 60)}
 
 
@@ -45,6 +46,7 @@ class Viewport(QWidget):
         self.frame = 0  # increments with every rendered frame; keys the SAM2 embedding
         self.points, self.labels = [], []
         self.mask = self.score = self._overlay = None
+        self.bigger = self.bigger_score = None  # a larger mask SAM2 offered for the same click
         self._press = None
         self._dragging = False
         self._timer = QTimer(self)
@@ -165,19 +167,44 @@ class Viewport(QWidget):
     def clear_prompts(self):
         self.points, self.labels = [], []
         self.mask = self.score = self._overlay = None
+        self.bigger = self.bigger_score = None
         self.update()
         self.prompts_changed.emit()
 
+    def take_bigger(self):
+        """Swap in the larger mask SAM2 offered for the same click."""
+        if self.bigger is None:
+            return False
+        self.mask, self.score = self.bigger, self.bigger_score
+        self.bigger = self.bigger_score = None
+        self._show_mask()
+        self.prompts_changed.emit()
+        return True
+
+    def _show_mask(self):
+        mask = self.mask
+        rgba = np.zeros((*mask.shape, 4), np.uint8)
+        rgba[mask] = MASK_RGBA
+        self._overlay = QImage(rgba.data, mask.shape[1], mask.shape[0], 4 * mask.shape[1],
+                               QImage.Format_RGBA8888).copy()
+        self.update()
+
     def _segment(self):
-        """Mask for the current points; False when SAM2 fails, leaving points and mask for the caller to restore."""
+        """Mask for the current points; False when SAM2 fails, leaving points and mask for the caller to restore.
+
+        A lone click on a plant or a box often comes back with one leaf or one face.
+        SAM2 offers other candidates for the same click, and a much larger one is the
+        sign of that, so it is kept aside for the user to take in one go.
+        """
         if 1 not in self.labels:  # background points alone do not describe an object
             self.mask = self.score = self._overlay = None
+            self.bigger = self.bigger_score = None
             self.update()
             self.prompts_changed.emit()
             return True
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            mask, score = self.segmenter.predict(self.pixels, self.frame, self.points, self.labels)
+            masks, scores = self.segmenter.candidates(self.pixels, self.frame, self.points, self.labels)
         except Exception as exc:
             error = str(exc)
         else:
@@ -187,11 +214,14 @@ class Viewport(QWidget):
         if error is not None:
             self.failed.emit(error)
             return False
-        self.mask, self.score = mask, score
-        rgba = np.zeros((*mask.shape, 4), np.uint8)
-        rgba[mask] = MASK_RGBA
-        self._overlay = QImage(rgba.data, mask.shape[1], mask.shape[0], 4 * mask.shape[1], QImage.Format_RGBA8888).copy()
-        self.update()
+        best = int(np.argmax(scores))
+        self.mask, self.score = masks[best], float(scores[best])
+        areas = np.array([mask.sum() for mask in masks], dtype=float)
+        widest = int(np.argmax(areas))
+        self.bigger = self.bigger_score = None
+        if areas[widest] > PARTIAL * max(areas[best], 1):
+            self.bigger, self.bigger_score = masks[widest], float(scores[widest])
+        self._show_mask()
         self.prompts_changed.emit()
         return True
 

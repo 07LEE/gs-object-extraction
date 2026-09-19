@@ -104,17 +104,28 @@ def test_double_click_on_the_object_makes_it_the_orbit_centre_without_moving_the
 
 
 class FakeSegmenter:
-    def __init__(self, fail=False):
-        self.calls, self.fail = [], fail
+    """A square around the click; ``part_of`` also offers the larger mask it belongs to."""
 
-    def predict(self, image, key, points, labels):
+    def __init__(self, fail=False, part_of=0):
+        self.calls, self.fail, self.part_of = [], fail, part_of
+
+    def candidates(self, image, key, points, labels, *, several=None):
         if self.fail:
             raise FileNotFoundError("SAM2 checkpoint not found: x.pt (run scripts/setup_env.sh)")
         self.calls.append((key, list(points), list(labels)))
-        mask = np.zeros(image.shape[:2], bool)
         x, y = points[0]
-        mask[max(0, y - 10):y + 10, max(0, x - 10):x + 10] = True
-        return mask, .9
+        masks, scores = [], []
+        for reach, score in [(10, .9)] + ([(10 * self.part_of, .8)] if self.part_of else []):
+            mask = np.zeros(image.shape[:2], bool)
+            mask[max(0, y - reach):y + reach, max(0, x - reach):x + reach] = True
+            masks.append(mask)
+            scores.append(score)
+        return np.stack(masks), np.array(scores)
+
+    def predict(self, image, key, points, labels):
+        masks, scores = self.candidates(image, key, points, labels)
+        best = int(np.argmax(scores))
+        return masks[best], float(scores[best])
 
 
 def ready_window(segmenter):
@@ -516,6 +527,33 @@ def test_a_failed_sam2_load_is_reported_without_a_dialog(app, monkeypatch):
     window.set_selecting(True)
     pump(app, lambda: window.model_job is None)
     assert "setup_env.sh" in window.statusBar().currentMessage()
+
+
+def test_a_click_that_catches_a_part_offers_the_bigger_mask(app):
+    """SAM2 answers a click on a leaf with the leaf; the whole plant is among its other candidates."""
+    fake = FakeSegmenter(part_of=4)
+    window, view = ready_window(fake)
+    window.set_selecting(True)
+    click(view, 100, 80, Qt.LeftButton)
+    assert view.bigger is not None and window.bigger_button.isVisible()
+    assert "part of the object" in window.prompt_label.text()
+    small = int(view.mask.sum())
+    window.bigger_button.click()
+    assert view.mask.sum() > 4 * small and view.bigger is None and not window.bigger_button.isVisible()
+    assert view.score == .8 and "px" in window.statusBar().currentMessage()
+    taken = int(view.mask.sum())
+    window.add_view()
+    assert int(window.views[0].mask.sum()) == taken  # the view keeps the mask that was on screen
+
+
+def test_a_click_that_catches_the_object_offers_nothing(app):
+    window, view = ready_window(FakeSegmenter())
+    window.set_selecting(True)
+    click(view, 100, 80, Qt.LeftButton)
+    assert view.bigger is None and not window.bigger_button.isVisible()
+    assert not window.viewport.take_bigger()  # nothing to take
+    window.undo_action.trigger()
+    assert view.bigger is None and not window.bigger_button.isVisible()
 
 
 def test_sam2_checkpoint_option_reaches_the_window(app, monkeypatch):

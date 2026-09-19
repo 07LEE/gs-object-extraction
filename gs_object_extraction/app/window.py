@@ -137,6 +137,11 @@ class MainWindow(QMainWindow):
         self.prompt_label.setMinimumHeight(3 * self.prompt_label.fontMetrics().height())  # room for the mask line
         self.add_button = QPushButton("Add view")
         self.add_button.clicked.connect(self.add_view)
+        self.bigger_button = QPushButton("Take the bigger mask")
+        self.bigger_button.setToolTip("SAM2 offered a much larger mask for the same click, "
+                                      "which is usually the whole object rather than one part of it")
+        self.bigger_button.clicked.connect(self.take_bigger)
+        self.bigger_button.hide()
         self.view_list = QListWidget()
         self.view_list.currentRowChanged.connect(self.update_extraction_state)
         self.remove_button = QPushButton("Remove view")
@@ -145,8 +150,8 @@ class MainWindow(QMainWindow):
         self.auto_button.setToolTip("Mark one view first, then this marks a ring of views from it. "
                                     "Check the result: pressing it again keeps what is marked and adds another ring")
         self.auto_button.clicked.connect(self.start_auto_mark)
-        for widget in (select, self.prompt_label, self.add_button, QLabel("Views"), self.view_list,
-                       self.remove_button, self.auto_button):
+        for widget in (select, self.prompt_label, self.bigger_button, self.add_button, QLabel("Views"),
+                       self.view_list, self.remove_button, self.auto_button):
             column.addWidget(widget)
         return box
 
@@ -311,13 +316,21 @@ class MainWindow(QMainWindow):
             text = f"{objects} object / {len(view.labels) - objects} background points"
             if view.mask is not None:
                 text += f", mask {int(view.mask.sum()):,} px (score {view.score:.2f})"
+                if view.bigger is not None:
+                    text += ". This looks like part of the object"
             elif not objects:
                 text += ", add an object point"
         self.prompt_label.setText(text)
+        self.bigger_button.setVisible(view.bigger is not None)
         ready = (self.extraction_job is None and view.active is None and 1 in view.labels
                  and view.mask is not None and bool(view.mask.any()))
         self.add_button.setEnabled(ready)
         self.add_view_action.setEnabled(ready)
+
+    def take_bigger(self):
+        """Replace the mask with the larger one SAM2 offered for the same click."""
+        if self.viewport.take_bigger():
+            self.statusBar().showMessage(f"Mask is now {int(self.viewport.mask.sum()):,} px")
 
     def add_view(self):
         view = self.viewport
