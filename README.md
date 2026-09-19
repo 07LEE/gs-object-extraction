@@ -1,28 +1,30 @@
 # 3D Gaussian Splatting Object Extraction
 
-Cut one object out of a trained 3D Gaussian Splatting scene and save it as a standalone PLY. Click the object in the viewer, SAM2 masks the rendered views, and only the object's Gaussians are kept. Source photos are never read.
+Extract an object from a trained 3D Gaussian Splatting scene and export it as a standalone PLY. SAM2 segments rendered views to identify the object's Gaussians. No source photos are needed.
 
 ![A scene and the object extracted from it](docs/images/scene-and-object.jpg)
 
 ## How it works
 
-1. Open a PLY and look around.
-2. Click the object in a few views. SAM2 draws the mask, Enter adds the view.
-3. Extract. The masks are lifted to Gaussians, then the selection is rendered on its own to drop pieces outside the masks.
-4. Export the object.
+1. Open a scene PLY and position the camera.
+2. Press **S** to enter select mode, then click the object. Review the SAM2 mask and press **Enter** to add the view.
+3. Repeat from several angles, then press **Ctrl+E** to extract the object.
+4. Review the preview and press **Ctrl+Shift+S** to export a PLY.
 
 ## Installation
 
-Needs a CUDA GPU and the environment used to train Graphdeco 3DGS, that is PyTorch and diff_gaussian_rasterization. The script builds .venv-gpu on top of it, installs requirements.txt and fetches the SAM2 checkpoint.
+Requires a CUDA GPU and a Python environment with PyTorch, torchvision and `diff_gaussian_rasterization`, such as the one used to train Graphdeco 3DGS.
+
+Run from the repository root. The setup script creates `.venv-gpu` using that environment's packages, installs this tool and its dependencies, and downloads the SAM2 checkpoint.
 
 ```bash
 GS_PYTHON=/path/to/gs_train/bin/python scripts/setup_env.sh
 source .venv-gpu/bin/activate
 ```
 
-## The viewer
+## Viewer
 
-The input is the point_cloud.ply a Graphdeco 3DGS run writes.
+Open a `point_cloud.ply` produced by Graphdeco 3DGS:
 
 ```bash
 gs-object-extraction-gui path/to/point_cloud.ply
@@ -33,23 +35,18 @@ gs-object-extraction-gui path/to/point_cloud.ply
 | Input | Action |
 | --- | --- |
 | Left drag, right drag, wheel | Orbit, pan, zoom |
-| Double-click | Put the rotation centre under the cursor |
-| S | Select mode on and off |
-| Left click, right click | Object point, background point |
+| Double-click (outside select mode) | Centre rotation on the point under the cursor |
+| S | Toggle select mode |
+| Left click, right click (select mode) | Add an object point or background point |
 | Backspace, Esc, Enter | Undo a point, clear the points, add the view |
 | Ctrl+E, Ctrl+Shift+S | Extract the object, export it as a PLY |
 
-Mark the object all the way around, about sixteen views, with the camera kept low; steep views drag in the ground behind the object. Mark around the object does that for you from the views you have marked already: it is experimental, so look at what it marked, and press it again if the object still comes out cut short. Edge trim pulls in the Gaussians that reach past the masks, which is what leaves a halo around the object; set it to 1.00 to keep them as they are. Two limits stay: the underside no view ever saw comes out empty, and thin structures such as leaves come out slightly thinned at the edges.
+- Mark views around the object; about 16 is a useful starting point. Keep the camera low to reduce ground included in the masks.
+- **Mark around the object (experimental)** adds views automatically from your existing selections. Review the results and rerun if parts of the object are missing.
+- **Edge trim** shrinks Gaussians that extend beyond the masks to reduce halos. Set it to `1.00` to preserve their size.
 
-## Tests
-
-The second line runs the CUDA and SAM2 tests, which the first one skips.
-
-```bash
-python3 -m pytest -q
-GS_OBJECT_EXTRACTION_TEST_CUDA=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q
-```
+Surfaces missing from the source scene cannot be recovered. Thin structures such as leaves may lose detail at the edges.
 
 ## License
 
-Apache 2.0, see LICENSE. The renderer this tool needs, diff_gaussian_rasterization from INRIA and MPII, is licensed for non-commercial research use; commercial use needs their permission.
+[Apache 2.0](LICENSE)

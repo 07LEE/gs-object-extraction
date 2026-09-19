@@ -7,8 +7,16 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 unset PYTHONPATH  # paths from other Python installs (e.g. ROS) break the environment
 
-GS_PYTHON=${GS_PYTHON:-/path/to/gs_train/bin/python}
+GS_PYTHON=${GS_PYTHON:-}
 VENV=${VENV:-.venv-gpu}
+
+if [ -z "$GS_PYTHON" ]; then
+  echo "set GS_PYTHON to the python of the environment that trains Graphdeco 3DGS, the one" >&2
+  echo "where 'import torch, torchvision, diff_gaussian_rasterization' works, for example" >&2
+  echo "  GS_PYTHON=~/miniconda3/envs/gs_train/bin/python scripts/setup_env.sh" >&2
+  exit 1
+fi
+[ -x "$GS_PYTHON" ] || { echo "GS_PYTHON is not an executable: $GS_PYTHON" >&2; exit 1; }
 CHECKPOINT_URL=https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_base_plus.pt
 CHECKPOINT=checkpoints/sam2.1_hiera_base_plus.pt
 
