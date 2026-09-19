@@ -167,10 +167,12 @@ def test_extract_cleans_hidden_fragments_previews_and_exports_full_gaussians(app
     # The object is drawn from Gaussians of its own, so the whole of it is on screen.
     assert window.viewport.renderer is not renderer and len(window.object_scene) == int(CLEANED.sum())
     np.testing.assert_array_equal(window.object_scene.ids, original.ids[CLEANED])
-    for background, color in (("White", 255), ("Black", 0)):
+    object_renderer, object_scene = window.viewport.renderer, window.object_scene
+    for background, color in (("Black", 0), ("White", 255), ("Black", 0)):
         window.background_box.setCurrentText(background)
         window.viewport.render_now()
-        object_renderer = window.viewport.renderer
+        assert window.viewport.renderer is object_renderer
+        assert window.object_scene is object_scene
         active, rgb = object_renderer.image_calls[-1]
         np.testing.assert_array_equal(active, np.ones(int(CLEANED.sum()), bool))
         assert rgb == (color / 255,) * 3
@@ -206,6 +208,28 @@ class EdgeRenderer(FakeRenderer):
         if active is not None:  # the cleaning round is where the off-mask shares come from
             lifted.inside[0], lifted.outside[0] = .8, .2
         return lifted
+
+
+@pytest.mark.skipif(os.environ.get("GS_OBJECT_EXTRACTION_TEST_CUDA") != "1",
+                    reason="set GS_OBJECT_EXTRACTION_TEST_CUDA=1 in the GPU environment")
+def test_background_reuse_matches_fresh_cuda_renderer(app, make_window):
+    from gs_object_extraction.renderer import GraphdecoRenderer
+
+    window, _ = make_window()
+    window.renderer_factory = GraphdecoRenderer
+    extract_object(app, window)
+    renderer, scene = window.viewport.renderer, window.object_scene
+    buffers = [getattr(renderer, name).data_ptr()
+               for name in ("means", "scales", "rotations", "opacities", "sh")]
+    reference = GraphdecoRenderer(scene)
+    for name, background in (("Black", (0., 0., 0.)), ("White", (1., 1., 1.))):
+        window.background_box.setCurrentText(name)
+        window.viewport.render_now()
+        assert window.viewport.renderer is renderer and window.object_scene is scene
+        assert buffers == [getattr(renderer, key).data_ptr()
+                           for key in ("means", "scales", "rotations", "opacities", "sh")]
+        expected = reference.render_image(window.viewport.camera, background=background)
+        np.testing.assert_array_equal(window.viewport.pixels, expected)
 
 
 def test_the_edge_trim_pulls_in_what_reaches_past_the_masks(app, make_window, tmp_path, dialogs):

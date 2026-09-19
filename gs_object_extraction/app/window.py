@@ -177,7 +177,7 @@ class MainWindow(QMainWindow):
         self.preview_box.currentIndexChanged.connect(self.update_preview)
         self.background_box = QComboBox()
         self.background_box.addItems(["White", "Black"])
-        self.background_box.currentIndexChanged.connect(self.update_preview)
+        self.background_box.currentIndexChanged.connect(self.update_background)
         self.trim_box = QDoubleSpinBox()
         self.trim_box.setRange(.5, 1.)
         self.trim_box.setSingleStep(.05)
@@ -402,6 +402,13 @@ class MainWindow(QMainWindow):
             return self.renderer_factory(scene)
         from ..renderer import GraphdecoRenderer
         return GraphdecoRenderer(scene)
+
+    def update_background(self, *_):
+        """Redraw the existing object without copying or uploading its Gaussians."""
+        if self.extraction_job is not None or self.auto_job is not None or self.viewport.active is None:
+            return
+        background = (1., 1., 1.) if self.background_box.currentIndex() == 0 else (0., 0., 0.)
+        self.viewport.set_preview(self.viewport.active, background)
 
     def update_preview(self, *_):
         """Show the scene, or the object on its own as the export will hold it."""
