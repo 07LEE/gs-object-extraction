@@ -1,7 +1,7 @@
 import os
 import numpy as np
 import pytest
-from gs_object_extraction.app.segmenter import DEFAULT_CHECKPOINT, Segmenter
+from gs_object_extraction.app.segmenter import DEFAULT_CHECKPOINT, WARMUP_SIZE, Segmenter
 
 
 class FakePredictor:
@@ -43,6 +43,61 @@ def test_embedding_is_computed_once_per_view():
     seg.forget_view()
     seg.predict(image, key=2, points=[(0, 0)], labels=[1])
     assert len(fake.images) == 3
+
+
+def test_the_warmup_embeds_once_and_leaves_no_view_behind():
+    """The first click pays for kernel autotuning, so the loading thread spends a throwaway prompt first."""
+    fake = FakePredictor()
+    seg = Segmenter(predictor=fake)
+    assert seg.warm() is fake
+    assert fake.images == [(WARMUP_SIZE, WARMUP_SIZE, 3)] and len(fake.calls) == 1
+    seg.predict(np.zeros((4, 5, 3), np.uint8), key=1, points=[(0, 0)], labels=[1])
+    assert len(fake.images) == 2  # the throwaway view is not mistaken for the one on screen
+
+
+def test_a_warmup_that_fails_still_leaves_the_model_usable():
+    class RefusingPredictor(FakePredictor):
+        def predict(self, **kwargs):
+            if not self.calls:
+                self.calls.append(None)
+                raise RuntimeError("CUDA out of memory")
+            return super().predict(**kwargs)
+
+    fake = RefusingPredictor()
+    seg = Segmenter(predictor=fake)
+    seg.warm()
+    assert seg.loaded
+    mask, score = seg.predict(np.zeros((4, 5, 3), np.uint8), key=1, points=[(2, 1)], labels=[1])
+    assert score == .9 and mask.any()
+
+
+def test_a_click_waits_for_a_warmup_on_another_thread():
+    """Two threads must not reach one predictor at once; the lock covers the prompt, not only the build."""
+    import threading
+    import time
+    overlaps = []
+
+    class WatchingPredictor(FakePredictor):
+        def __init__(self):
+            super().__init__()
+            self.inside = False
+
+        def set_image(self, image):
+            overlaps.append(self.inside)
+            self.inside = True
+            time.sleep(.05)  # long enough for the other thread to arrive
+            super().set_image(image)
+            self.inside = False
+
+    seg = Segmenter(predictor=WatchingPredictor())
+    image = np.zeros((4, 5, 3), np.uint8)
+    threads = [threading.Thread(target=seg.warm),
+               threading.Thread(target=lambda: seg.predict(image, key=1, points=[(0, 0)], labels=[1]))]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(5)
+    assert overlaps == [False, False]
 
 
 @pytest.mark.parametrize("points, labels", [([], []), ([(1, 1)], [1, 0]), ([(1, 1)], [2])])

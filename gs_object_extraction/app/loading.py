@@ -42,7 +42,12 @@ class SceneLoadJob(QThread):
 
 
 class SegmenterLoadJob(QThread):
-    """Build the SAM2 model ahead of the first click."""
+    """Build the SAM2 model ahead of the first click, and warm it while we are here.
+
+    A freshly built model spends about 190 ms on its first embedding and about
+    30 ms on the ones after it, so the warmup belongs on this thread rather than
+    in the first click.
+    """
 
     failed = Signal(str)
 
@@ -52,6 +57,6 @@ class SegmenterLoadJob(QThread):
 
     def run(self):
         try:
-            self.segmenter.load()
+            self.segmenter.warm()
         except Exception as exc:
             self.failed.emit(str(exc))

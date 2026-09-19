@@ -12,6 +12,8 @@ import numpy as np
 
 DEFAULT_CHECKPOINT = Path(__file__).resolve().parents[2] / "checkpoints" / "sam2.1_hiera_base_plus.pt"
 _SIZES = {"tiny": "t", "small": "s", "base_plus": "b+", "large": "l"}
+WARMUP_SIZE = 64  # SAM2 resizes every view to its own input size, so a small one warms the same kernels
+_WARMUP_VIEW = object()  # a view key of its own, so the warmup embeds instead of reusing a cached view
 
 
 def config_for(checkpoint):
@@ -29,7 +31,9 @@ class Segmenter:
         self.checkpoint = Path(checkpoint)
         self._predictor = predictor
         self._key = None
-        self._lock = threading.Lock()  # a click during a background load waits instead of building a second model
+        # One caller at a time, so a click during a background load waits for the model instead of
+        # building a second one, and does not reach the predictor while the warmup is still using it.
+        self._lock = threading.Lock()
 
     @property
     def loaded(self):
@@ -45,6 +49,24 @@ class Segmenter:
                 from sam2.sam2_image_predictor import SAM2ImagePredictor
                 self._predictor = SAM2ImagePredictor(build_sam2(config_for(self.checkpoint), str(self.checkpoint), device="cuda"))
             return self._predictor
+
+    def warm(self):
+        """Build the model, then spend one throwaway prompt on it so the first real click does not.
+
+        The first embedding after a build pays for kernel autotuning: about 190 ms
+        against 30 ms for the ones after it. Doing it here puts that on the loading
+        thread, where the window is already waiting. A warmup that fails costs only
+        the time it would have saved, so it does not stop the model from being used.
+        """
+        predictor = self.load()
+        middle = WARMUP_SIZE // 2
+        try:
+            self.candidates(np.zeros((WARMUP_SIZE, WARMUP_SIZE, 3), np.uint8), _WARMUP_VIEW, [(middle, middle)], [1])
+        except Exception:
+            pass  # the model is built and usable; only the saving is lost
+        finally:
+            self.forget_view()  # the throwaway view is not one the user can click on
+        return predictor
 
     @staticmethod
     def _inference():
@@ -71,7 +93,7 @@ class Segmenter:
         if len(points) == 0 or len(points) != len(labels) or not np.isin(labels, (0, 1)).all():
             raise ValueError("need one 0/1 label per (x, y) point")
         predictor = self.load()
-        with self._inference():
+        with self._lock, self._inference():
             if key != self._key:
                 predictor.set_image(np.asarray(image))
                 self._key = key

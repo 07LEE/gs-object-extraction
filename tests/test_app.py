@@ -450,6 +450,9 @@ class SlowSegmenter:
         self.builds += 1
         self.loaded = True
 
+    def warm(self):
+        self.load()
+
 
 def pump(app, predicate, timeout=5):
     deadline = time.monotonic() + timeout
