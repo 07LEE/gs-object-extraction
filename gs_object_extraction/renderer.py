@@ -81,6 +81,14 @@ class GraphdecoRenderer:
     def _tensor(self, values):
         return self.torch.as_tensor(np.asarray(values).copy(), dtype=self.torch.float32, device="cuda").contiguous()
 
+    def update_scales(self, scales):
+        """Replace sizes in the existing GPU buffer; leave all other attributes intact."""
+        scales = np.asarray(scales, dtype=np.float32)
+        if scales.shape != (self.n, 3) or not np.isfinite(scales).all() or np.any(scales <= 0):
+            raise ValueError("scales must be positive finite N x 3")
+        with self.torch.no_grad():
+            self.scales.copy_(self.torch.as_tensor(np.ascontiguousarray(scales)))
+
     def _settings(self, camera, background):
         view = self._tensor(camera.world_to_camera.T)
         proj = self._tensor(projection_matrix(camera).T)

@@ -184,7 +184,7 @@ class MainWindow(QMainWindow):
         self.trim_box.setValue(TRIM)
         self.trim_box.setToolTip("Pulls in the Gaussians that reach past the masks, which is what haloes the object; "
                                  "1.00 leaves them as they are")
-        self.trim_box.valueChanged.connect(self.update_preview)
+        self.trim_box.valueChanged.connect(self.update_trim)
         self.export_button = QPushButton("Export object PLY...")
         self.export_button.clicked.connect(self.choose_export)
         for widget in (QLabel("Off-mask limit"), self.off_threshold_box,
@@ -393,9 +393,14 @@ class MainWindow(QMainWindow):
             return None
         cleaned = self.stages["cleaned"]
         object_scene = self.scene.subset(cleaned)
-        factors = trim_scales(self.stages["off"][cleaned], factor=self.trim_box.value())
-        object_scene.scales = object_scene.scales * factors[:, None]
+        object_scene.scales = self.trimmed_scales()
         return object_scene
+
+    def trimmed_scales(self):
+        """Always trim from the source sizes so repeated adjustments do not accumulate."""
+        cleaned = self.stages["cleaned"]
+        factors = trim_scales(self.stages["off"][cleaned], factor=self.trim_box.value())
+        return self.scene.scales[cleaned] * factors[:, None]
 
     def _renderer_for(self, scene):
         if self.renderer_factory is not None:
@@ -409,6 +414,21 @@ class MainWindow(QMainWindow):
             return
         background = (1., 1., 1.) if self.background_box.currentIndex() == 0 else (0., 0., 0.)
         self.viewport.set_preview(self.viewport.active, background)
+
+    def update_trim(self, *_):
+        """Update only the displayed object's sizes, keeping its renderer and attributes."""
+        if (self.extraction_job is not None or self.auto_job is not None
+                or self.load_job is not None or self.object_scene is None):
+            return
+        scales = self.trimmed_scales()
+        try:
+            self.viewport.renderer.update_scales(scales)
+        except Exception as exc:
+            self.preview_box.setCurrentIndex(0)
+            self.statusBar().showMessage(f"Cannot update object sizes: {exc}")
+            return
+        self.object_scene.scales = scales
+        self.viewport.view_changed()
 
     def update_preview(self, *_):
         """Show the scene, or the object on its own as the export will hold it."""

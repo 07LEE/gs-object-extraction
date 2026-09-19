@@ -59,6 +59,9 @@ class FakeRenderer:
         return Lifted(weights[:, labels == 1].sum(1), weights[:, labels == 0].sum(1),
                       weights.sum(axis=(1, 2)))
 
+    def update_scales(self, scales):
+        self.scales = scales.copy()
+
     def render_image(self, camera, *, active=None, background=BACKGROUND):
         self.image_calls.append((None if active is None else active.copy(), tuple(background)))
         pixels = np.empty((camera.height, camera.width, 3), np.uint8)
@@ -232,14 +235,23 @@ def test_background_reuse_matches_fresh_cuda_renderer(app, make_window):
         np.testing.assert_array_equal(window.viewport.pixels, expected)
 
 
-def test_the_edge_trim_pulls_in_what_reaches_past_the_masks(app, make_window, tmp_path, dialogs):
+@pytest.mark.parametrize("cuda", [False, pytest.param(True, marks=pytest.mark.skipif(
+    os.environ.get("GS_OBJECT_EXTRACTION_TEST_CUDA") != "1", reason="requires CUDA"))])
+def test_the_edge_trim_pulls_in_what_reaches_past_the_masks(app, make_window, tmp_path, dialogs, cuda):
     window, _ = make_window(EdgeRenderer())
+    if cuda:
+        from gs_object_extraction.renderer import GraphdecoRenderer
+        window.renderer_factory = GraphdecoRenderer
     original = window.scene.copy()
     extract_object(app, window)
     np.testing.assert_array_equal(window.stages["cleaned"], CLEANED)
     assert window.stages["off"][0] == pytest.approx(.2)
 
     shown = window.object_scene  # the preview holds what the export will write
+    renderer = window.viewport.renderer
+    if cuda:
+        buffers = [getattr(renderer, name).data_ptr()
+                   for name in ("means", "scales", "rotations", "opacities", "sh")]
     np.testing.assert_allclose(shown.scales[0], original.scales[0] * TRIM)
     np.testing.assert_allclose(shown.scales[1], original.scales[1])
     assert window.export_ply(tmp_path / "trimmed.ply")
@@ -248,12 +260,56 @@ def test_the_edge_trim_pulls_in_what_reaches_past_the_masks(app, make_window, tm
     np.testing.assert_allclose(exported.scales[1], original.scales[1], rtol=3e-7)
     np.testing.assert_array_equal(window.scene.scales, original.scales)  # the scene itself is untouched
 
-    window.trim_box.setValue(1.)
-    app.processEvents()
-    np.testing.assert_allclose(window.object_scene.scales, original.scales[CLEANED])
+    for factor in (.5, .85, .7, 1.):
+        window.trim_box.setValue(factor)
+        app.processEvents()
+        expected = original.scales[CLEANED].copy()
+        expected[0] *= factor
+        assert window.viewport.renderer is renderer and window.object_scene is shown
+        np.testing.assert_allclose(shown.scales, expected)
+        np.testing.assert_array_equal(window.scene.scales, original.scales)
+        assert window.export_ply(tmp_path / "adjusted.ply")
+        np.testing.assert_allclose(load_ply(tmp_path / "adjusted.ply").scales, expected, rtol=3e-7)
+        if cuda:
+            assert buffers == [getattr(renderer, name).data_ptr()
+                               for name in ("means", "scales", "rotations", "opacities", "sh")]
+            fresh = GraphdecoRenderer(window.trimmed_object())
+            window.viewport.render_now()
+            camera = window.viewport.camera
+            np.testing.assert_array_equal(window.viewport.pixels,
+                fresh.render_image(camera, background=window.viewport.background))
+            for actual, reference in zip(renderer.depth_image(camera), fresh.depth_image(camera)):
+                np.testing.assert_allclose(actual, reference)
     assert window.export_ply(tmp_path / "whole.ply")
     np.testing.assert_allclose(load_ply(tmp_path / "whole.ply").scales, original.scales[CLEANED], rtol=3e-7)
     assert not dialogs
+
+
+def test_trim_changed_in_scene_mode_is_used_for_export_and_next_preview(app, make_window, tmp_path):
+    window, renderer = make_window(EdgeRenderer())
+    extract_object(app, window)
+    window.preview_box.setCurrentText("Scene")
+    window.trim_box.setValue(.5)
+    assert window.viewport.renderer is renderer and window.object_scene is None
+    assert window.export_ply(tmp_path / "object.ply")
+    exported = load_ply(tmp_path / "object.ply")
+    window.preview_box.setCurrentText("Object only")
+    np.testing.assert_allclose(window.object_scene.scales, exported.scales, rtol=3e-7)
+    np.testing.assert_allclose(exported.scales[0], window.scene.scales[0] * .5, rtol=3e-7)
+
+
+def test_trim_upload_failure_returns_to_scene(app, make_window, monkeypatch):
+    window, scene_renderer = make_window(EdgeRenderer())
+    extract_object(app, window)
+
+    def fail(scales):
+        raise RuntimeError("GPU upload failed")
+
+    monkeypatch.setattr(window.viewport.renderer, "update_scales", fail)
+    window.trim_box.setValue(.5)
+    assert window.preview_box.currentText() == "Scene"
+    assert window.viewport.renderer is scene_renderer and window.object_scene is None
+    assert "GPU upload failed" in window.statusBar().currentMessage()
 
 
 @pytest.mark.parametrize("change", ["add", "remove", "open"])
