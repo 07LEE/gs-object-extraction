@@ -2,7 +2,7 @@
 
 Extract an object from a trained 3D Gaussian Splatting scene and export it as a standalone PLY. SAM2 segments rendered views to identify the object's Gaussians. No source photos are needed.
 
-![A scene and the object extracted from it](docs/images/scene-and-object.jpg)
+![A scene and the object extracted from it, turning](docs/images/scene-and-object.webp)
 
 ## How it works
 
