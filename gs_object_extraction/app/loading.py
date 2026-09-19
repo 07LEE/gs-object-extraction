@@ -44,9 +44,9 @@ class SceneLoadJob(QThread):
 class SegmenterLoadJob(QThread):
     """Build the SAM2 model ahead of the first click, and warm it while we are here.
 
-    A freshly built model spends about 190 ms on its first embedding and about
-    30 ms on the ones after it, so the warmup belongs on this thread rather than
-    in the first click.
+    A freshly built model spends several times as long on its first embedding as on
+    the ones after it, so the warmup belongs on this thread rather than in the first
+    click. See ``Segmenter.warm`` for what that came to when it was measured.
     """
 
     failed = Signal(str)

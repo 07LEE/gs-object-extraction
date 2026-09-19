@@ -49,4 +49,6 @@ Surfaces missing from the source scene cannot be recovered. Thin structures such
 
 ## License
 
-[Apache 2.0](LICENSE)
+Licensing terms can be found in the [License File](LICENSE).
+
+Third-party dependencies are covered by their respective licenses, including [diff_gaussian_rasterization](https://github.com/graphdeco-inria/diff-gaussian-rasterization/blob/main/LICENSE.md) and [SAM2](https://github.com/facebookresearch/sam2/blob/2b90b9f5ceec907a1c18123530e92e794ad901a4/LICENSE).

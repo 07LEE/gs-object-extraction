@@ -53,10 +53,11 @@ class Segmenter:
     def warm(self):
         """Build the model, then spend one throwaway prompt on it so the first real click does not.
 
-        The first embedding after a build pays for kernel autotuning: about 190 ms
-        against 30 ms for the ones after it. Doing it here puts that on the loading
-        thread, where the window is already waiting. A warmup that fails costs only
-        the time it would have saved, so it does not stop the model from being used.
+        The first embedding after a build pays for kernel autotuning, several times
+        what the ones after it cost. Doing it on the loading thread, where the window
+        is already waiting, is what the first click is spared. A warmup that fails
+        costs only the time it would have saved, so it does not stop the model being
+        used.
         """
         predictor = self.load()
         middle = WARMUP_SIZE // 2

@@ -76,7 +76,8 @@ class Exclusive:
         """Hold the renderer across a series of calls; yields whether it was obtained.
 
         ``blocking=False`` gives up at once instead of queueing behind a lift, which
-        takes about 70 ms: the window skips that frame rather than stall its event loop.
+        costs several frames' worth of time on any scene worth extracting: the window
+        skips that frame rather than stall its event loop.
         """
         obtained = self._lock.acquire(blocking)
         try:
