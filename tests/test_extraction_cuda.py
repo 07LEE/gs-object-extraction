@@ -19,7 +19,7 @@ def test_real_worker_extracts_two_views_and_exports_the_foreground(tmp_path):
     from PySide6.QtWidgets import QApplication
     from gs_object_extraction.app.extraction import ExtractionJob
     from gs_object_extraction.app.views import MaskedView
-    from gs_object_extraction.renderer import GraphdecoRenderer
+    from gs_object_extraction.renderer import GsplatRenderer
 
     app = QApplication.instance() or QApplication([])
     # The centre group is the object; the two separated side groups are background.
@@ -39,7 +39,7 @@ def test_real_worker_extracts_two_views_and_exports_the_foreground(tmp_path):
                           extras={"confidence": np.linspace(.2, .9, n, dtype=np.float32),
                                   "source_weight": np.linspace(.123456789, .987654321, n)})
     foreground = np.arange(n) < len(offsets)
-    renderer = GraphdecoRenderer(scene)
+    renderer = GsplatRenderer(scene)
     cameras = [Camera.look_at(eye, (0., 0., 0.), width=96, height=72)
                for eye in ((0., 0., 4.), (.7, .3, 4.))]
     views = []

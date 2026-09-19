@@ -502,7 +502,7 @@ def slow_scene(monkeypatch, release):
         return scene
 
     monkeypatch.setattr("gs_object_extraction.app.loading.load_ply", load)
-    monkeypatch.setattr("gs_object_extraction.renderer.GraphdecoRenderer", lambda scene: ShiftingRenderer())
+    monkeypatch.setattr("gs_object_extraction.renderer.GsplatRenderer", lambda scene: ShiftingRenderer())
     return scene
 
 

@@ -13,12 +13,20 @@ Extract an object from a trained 3D Gaussian Splatting scene and export it as a 
 
 ## Installation
 
-Run from the repository root to install dependencies and download SAM2:
+Requires a CUDA GPU, Python 3.10–3.12 and the CUDA Toolkit. From the repository root, install PyTorch for your CUDA version (the index URL below is for CUDA 12.8), then the tool and the SAM2 checkpoint:
 
 ```bash
-scripts/setup_env.sh
+python3 -m venv .venv-gpu
 source .venv-gpu/bin/activate
+pip install --upgrade pip setuptools wheel
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+SAM2_BUILD_CUDA=0 pip install --no-build-isolation -r requirements.txt
+pip install --no-deps -e .
+mkdir -p checkpoints
+curl -L -o checkpoints/sam2.1_hiera_base_plus.pt https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_base_plus.pt
 ```
+
+gsplat compiles its CUDA kernels the first time a scene is opened, which takes a minute or two.
 
 ## Viewer
 
@@ -49,4 +57,4 @@ Surfaces missing from the source scene cannot be recovered. Thin structures such
 
 Licensing terms can be found in the [License File](LICENSE).
 
-SAM2 is covered by its own [license](https://github.com/facebookresearch/sam2/blob/2b90b9f5ceec907a1c18123530e92e794ad901a4/LICENSE).
+Third-party dependencies are distributed under their own licenses.

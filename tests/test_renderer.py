@@ -2,18 +2,10 @@ import os
 import numpy as np
 import pytest
 from gs_object_extraction.camera import Camera
-from gs_object_extraction.renderer import Exclusive, projection_matrix
+from gs_object_extraction.renderer import Exclusive
 from gs_object_extraction.scene import GaussianScene
 
 cuda = pytest.mark.skipif(os.environ.get("GS_OBJECT_EXTRACTION_TEST_CUDA") != "1", reason="set GS_OBJECT_EXTRACTION_TEST_CUDA=1 in the GPU environment")
-
-
-def test_projection_maps_arbitrary_intrinsics_to_pixel_coordinates():
-    camera = Camera(60, 40, 45, 42, 22.2, 25.3, np.eye(4))
-    xyz = np.array([[.2, .3, 2, 1], [-.6, -.1, 3, 1]])
-    clip = xyz @ projection_matrix(camera).T
-    uv = ((clip[:, :2] / clip[:, 3:4] + 1) * [camera.width, camera.height] - 1) / 2
-    np.testing.assert_allclose(uv, xyz[:, :2] / xyz[:, 2:3] * [camera.fx, camera.fy] + [camera.cx, camera.cy], atol=2e-6)
 
 
 def test_a_held_renderer_turns_away_a_caller_that_will_not_wait():
@@ -46,12 +38,15 @@ def test_holding_a_renderer_nests_so_its_own_calls_still_work():
         assert outer and inner
 
 
+def three_gaussian_scene():
+    return GaussianScene.from_colors(np.array([[0, 0, 2.], [.05, .02, 2.6], [.4, 0, 3.]]),
+                                     np.full((3, 3), .16), np.array([[.9, .1, .1], [.1, .8, .1], [.1, .1, .8]]),
+                                     np.array([.9, .85, .8]))
+
+
 def three_gaussians():
-    from gs_object_extraction.renderer import GraphdecoRenderer
-    scene = GaussianScene.from_colors(np.array([[0, 0, 2.], [.05, .02, 2.6], [.4, 0, 3.]]),
-                                      np.full((3, 3), .16), np.array([[.9, .1, .1], [.1, .8, .1], [.1, .1, .8]]),
-                                      np.array([.9, .85, .8]))
-    return GraphdecoRenderer(scene), Camera.look_at((0, 0, 0), (0, 0, 2), width=24, height=24)
+    from gs_object_extraction.renderer import GsplatRenderer
+    return GsplatRenderer(three_gaussian_scene()), Camera.look_at((0, 0, 0), (0, 0, 2), width=24, height=24)
 
 
 @cuda

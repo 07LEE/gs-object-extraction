@@ -22,14 +22,14 @@ class SceneLoadJob(QThread):
         self.chosen_up = chosen_up  # None follows the estimate, as the Auto up axis does
 
     def run(self):
-        from ..renderer import GraphdecoRenderer
+        from ..renderer import GsplatRenderer
         try:
             self.progress.emit("Reading the PLY")
             scene = load_ply(self.path)
             if self.isInterruptionRequested():
                 return
             self.progress.emit("Uploading to the GPU")
-            renderer = GraphdecoRenderer(scene)
+            renderer = GsplatRenderer(scene)
             if self.isInterruptionRequested():
                 return
             self.progress.emit("Framing the scene")

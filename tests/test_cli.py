@@ -44,7 +44,7 @@ def fake_scene(monkeypatch):
     monkeypatch.setattr(cli, "point_cloud", lambda model_dir: "point_cloud.ply")
     monkeypatch.setattr(cli, "load_ply", lambda path: scene)
     monkeypatch.setattr(cli, "preview", lambda *args: None)
-    monkeypatch.setattr("gs_object_extraction.renderer.GraphdecoRenderer", lambda scene: FakeRenderer())
+    monkeypatch.setattr("gs_object_extraction.renderer.GsplatRenderer", lambda scene: FakeRenderer())
     return views
 
 

@@ -405,8 +405,8 @@ class MainWindow(QMainWindow):
     def _renderer_for(self, scene):
         if self.renderer_factory is not None:
             return self.renderer_factory(scene)
-        from ..renderer import GraphdecoRenderer
-        return GraphdecoRenderer(scene)
+        from ..renderer import GsplatRenderer
+        return GsplatRenderer(scene)
 
     def update_background(self, *_):
         """Redraw the existing object without copying or uploading its Gaussians."""

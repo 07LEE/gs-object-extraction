@@ -49,10 +49,10 @@ def preview(renderer, camera, mask, before, after, path):
 
 def extract_scene(scene_dir, model_dir, output, **options):
     """Write ``object.ply``, ``summary.json`` and ``preview.png`` for one scene; return the summary."""
-    from .renderer import GraphdecoRenderer
+    from .renderer import GsplatRenderer
     train, held = usid_views(scene_dir, model_dir)
     scene = load_ply(point_cloud(model_dir))
-    renderer = GraphdecoRenderer(scene)
+    renderer = GsplatRenderer(scene)
     stages = ex.extract(renderer, train, **options)
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)

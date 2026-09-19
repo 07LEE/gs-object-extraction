@@ -146,13 +146,13 @@ def test_racing_callers_build_one_model(tmp_path, monkeypatch):
                     reason="needs the GPU environment and the SAM2 checkpoint")
 def test_sam2_segments_a_rendered_blob_from_one_click():
     from gs_object_extraction.app.orbit import Orbit
-    from gs_object_extraction.renderer import GraphdecoRenderer
+    from gs_object_extraction.renderer import GsplatRenderer
     from gs_object_extraction.scene import GaussianScene
     rng = np.random.default_rng(0)
     n = 600
     blob = GaussianScene.from_colors(rng.normal(0, .15, (n, 3)), np.full((n, 3), .04),
                                      np.tile([.9, .5, .1], (n, 1)), np.full(n, .95))
-    renderer = GraphdecoRenderer(blob)
+    renderer = GsplatRenderer(blob)
     camera = Orbit(np.zeros(3), 2.).camera(320, 240)
     image = renderer.render_image(camera, background=(.1, .1, .12))
     _, alpha = renderer.depth_image(camera)

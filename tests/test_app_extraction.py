@@ -232,15 +232,15 @@ class EdgeRenderer(FakeRenderer):
 @pytest.mark.skipif(os.environ.get("GS_OBJECT_EXTRACTION_TEST_CUDA") != "1",
                     reason="set GS_OBJECT_EXTRACTION_TEST_CUDA=1 in the GPU environment")
 def test_background_reuse_matches_fresh_cuda_renderer(app, make_window):
-    from gs_object_extraction.renderer import GraphdecoRenderer
+    from gs_object_extraction.renderer import GsplatRenderer
 
     window, _ = make_window()
-    window.renderer_factory = GraphdecoRenderer
+    window.renderer_factory = GsplatRenderer
     extract_object(app, window)
     renderer, scene = window.viewport.renderer, window.object_scene
     buffers = [getattr(renderer, name).data_ptr()
                for name in ("means", "scales", "rotations", "opacities", "sh")]
-    reference = GraphdecoRenderer(scene)
+    reference = GsplatRenderer(scene)
     for name, background in (("Black", (0., 0., 0.)), ("White", (1., 1., 1.))):
         window.background_box.setCurrentText(name)
         window.viewport.render_now()
@@ -256,8 +256,8 @@ def test_background_reuse_matches_fresh_cuda_renderer(app, make_window):
 def test_the_edge_trim_pulls_in_what_reaches_past_the_masks(app, make_window, tmp_path, dialogs, cuda):
     window, _ = make_window(EdgeRenderer())
     if cuda:
-        from gs_object_extraction.renderer import GraphdecoRenderer
-        window.renderer_factory = GraphdecoRenderer
+        from gs_object_extraction.renderer import GsplatRenderer
+        window.renderer_factory = GsplatRenderer
     original = window.scene.copy()
     extract_object(app, window)
     np.testing.assert_array_equal(window.stages["cleaned"], CLEANED)
@@ -289,7 +289,7 @@ def test_the_edge_trim_pulls_in_what_reaches_past_the_masks(app, make_window, tm
         if cuda:
             assert buffers == [getattr(renderer, name).data_ptr()
                                for name in ("means", "scales", "rotations", "opacities", "sh")]
-            fresh = GraphdecoRenderer(window.trimmed_object())
+            fresh = GsplatRenderer(window.trimmed_object())
             window.viewport.render_now()
             camera = window.viewport.camera
             np.testing.assert_array_equal(window.viewport.pixels,
@@ -313,8 +313,8 @@ def test_preview_controls_and_export_preserve_world_coordinates(app, make_window
     window.scene.quaternions = rotations / np.linalg.norm(rotations, axis=1)[:, None]
     original = window.scene.copy()
     if cuda:
-        from gs_object_extraction.renderer import GraphdecoRenderer
-        window.renderer_factory = GraphdecoRenderer
+        from gs_object_extraction.renderer import GsplatRenderer
+        window.renderer_factory = GsplatRenderer
     extract_object(app, window)
     selected = window.stages["cleaned"]
     renderer = window.viewport.renderer
@@ -404,7 +404,7 @@ def test_confirmed_view_or_scene_changes_invalidate_results(app, make_window, mo
     else:
         replacement = tmp_path / "replacement.ply"
         save_ply(make_scene(), replacement)
-        monkeypatch.setattr("gs_object_extraction.renderer.GraphdecoRenderer", lambda scene: FakeRenderer())
+        monkeypatch.setattr("gs_object_extraction.renderer.GsplatRenderer", lambda scene: FakeRenderer())
         assert window.open_ply(replacement)
         wait_until(app, lambda: window.load_job is None)
         assert window.source_path == replacement.resolve() and not window.views
