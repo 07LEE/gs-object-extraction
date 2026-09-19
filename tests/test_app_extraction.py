@@ -285,6 +285,64 @@ def test_the_edge_trim_pulls_in_what_reaches_past_the_masks(app, make_window, tm
     assert not dialogs
 
 
+@pytest.mark.parametrize("cuda", [False, pytest.param(True, marks=pytest.mark.skipif(
+    os.environ.get("GS_OBJECT_EXTRACTION_TEST_CUDA") != "1", reason="requires CUDA"))])
+def test_preview_controls_and_export_preserve_world_coordinates(app, make_window, tmp_path, cuda):
+    window, _ = make_window(EdgeRenderer())
+    # An off-origin object with distinct axes and arbitrary rotations exposes
+    # recentering, axis swaps and quaternion-order mistakes that spheres hide.
+    window.scene.means += [12., -7., 3.]
+    window.scene.scales *= [1., 2., 3.]
+    rotations = np.random.default_rng(53).normal(size=(len(window.scene), 4))
+    window.scene.quaternions = rotations / np.linalg.norm(rotations, axis=1)[:, None]
+    original = window.scene.copy()
+    if cuda:
+        from gs_object_extraction.renderer import GraphdecoRenderer
+        window.renderer_factory = GraphdecoRenderer
+    extract_object(app, window)
+    selected = window.stages["cleaned"]
+    renderer = window.viewport.renderer
+    source_covariances = original.covariances[selected]
+
+    for index in range(window.up_box.count()):
+        window.up_box.setCurrentIndex(index)
+        window.reset_view()
+        window.viewport.orbit.rotate(17, -9)
+        window.viewport.orbit.pan(4, 2, window.viewport.height())
+        camera_before = window.viewport.orbit.camera(64, 48).world_to_camera.copy()
+        factor = (.5, .85, 1.)[index % 3]
+        window.trim_box.setValue(factor)
+        window.background_box.setCurrentIndex(index % 2)
+        assert window.viewport.renderer is renderer
+        np.testing.assert_array_equal(window.viewport.orbit.camera(64, 48).world_to_camera, camera_before)
+        shown = window.object_scene
+        for name in ("means", "quaternions", "sh", "opacities", "ids"):
+            np.testing.assert_array_equal(getattr(shown, name), getattr(original, name)[selected])
+        factors = np.array([factor, 1.])  # only the first Gaussian needs edge trim
+        np.testing.assert_allclose(shown.covariances, source_covariances * factors[:, None, None] ** 2)
+        if cuda:
+            np.testing.assert_array_equal(renderer.means.cpu().numpy(), original.means[selected].astype(np.float32))
+            np.testing.assert_array_equal(renderer.rotations.cpu().numpy(), original.quaternions[selected].astype(np.float32))
+            np.testing.assert_array_equal(renderer.scales.cpu().numpy(), shown.scales.astype(np.float32))
+
+        path = tmp_path / f"axis_{index}.ply"
+        assert window.export_ply(path)
+        exported = load_ply(path)
+        np.testing.assert_array_equal(exported.ids, original.ids[selected])
+        # PLY stores coordinates as float32; no coordinate transform is allowed.
+        np.testing.assert_array_equal(exported.means, original.means[selected].astype(np.float32))
+        np.testing.assert_allclose(exported.quaternions, original.quaternions[selected], rtol=2e-6, atol=1e-7)
+        np.testing.assert_allclose(exported.covariances, shown.covariances, rtol=2e-6, atol=1e-8)
+        for name in ("means", "scales", "quaternions", "sh", "opacities"):
+            np.testing.assert_array_equal(getattr(window.scene, name), getattr(original, name))
+
+    window.preview_box.setCurrentText("Scene")
+    window.reset_view()
+    window.preview_box.setCurrentText("Object only")
+    np.testing.assert_array_equal(window.object_scene.means, original.means[selected])
+    np.testing.assert_array_equal(window.object_scene.quaternions, original.quaternions[selected])
+
+
 def test_trim_changed_in_scene_mode_is_used_for_export_and_next_preview(app, make_window, tmp_path):
     window, renderer = make_window(EdgeRenderer())
     extract_object(app, window)
