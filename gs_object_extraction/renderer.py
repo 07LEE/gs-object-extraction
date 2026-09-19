@@ -1,7 +1,6 @@
 """Graphdeco CUDA rendering and matrix-free mask lifting.
 
-Needs PyTorch and the ``diff_gaussian_rasterization`` extension (the gs_train
-environment). Lifting sets colour features to zero with gradients on, renders,
+Needs PyTorch and the ``diff_gaussian_rasterization`` extension. Lifting sets colour features to zero with gradients on, renders,
 and back-propagates a per-pixel label image: the gradient on Gaussian i is
 sum_p T_i(p) alpha_i(p) over the labelled pixels, so one backward pass gives
 every Gaussian's contribution without an N x H x W tensor. Nothing is optimised.
@@ -94,7 +93,7 @@ class GraphdecoRenderer(Exclusive):
             import torch
             import diff_gaussian_rasterization as dgr
         except ImportError as exc:
-            raise RuntimeError("rendering needs PyTorch and diff_gaussian_rasterization; use the gs_train Python environment") from exc
+            raise RuntimeError("rendering needs PyTorch and diff_gaussian_rasterization; run scripts/setup_env.sh and activate .venv-gpu") from exc
         if not torch.cuda.is_available():
             raise RuntimeError("CUDA is not accessible in this process")
         self.torch, self.dgr = torch, dgr

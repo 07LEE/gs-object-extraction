@@ -1,37 +1,73 @@
 #!/usr/bin/env bash
-# Build a virtual environment on top of the Graphdeco 3DGS training environment and install
-# requirements.txt, this package (editable) and the SAM2 checkpoint.
-#
-#   GS_PYTHON=/path/to/gs_train/bin/python VENV=.venv-gpu scripts/setup_env.sh
+# Install the application in an isolated Python environment.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-unset PYTHONPATH  # paths from other Python installs (e.g. ROS) break the environment
+unset PYTHONPATH PYTHONHOME
+export PYTHONNOUSERSITE=1
 
-GS_PYTHON=${GS_PYTHON:-}
 VENV=${VENV:-.venv-gpu}
-
-if [ -z "$GS_PYTHON" ]; then
-  echo "set GS_PYTHON to the python of the environment that trains Graphdeco 3DGS, the one" >&2
-  echo "where 'import torch, torchvision, diff_gaussian_rasterization' works, for example" >&2
-  echo "  GS_PYTHON=~/miniconda3/envs/gs_train/bin/python scripts/setup_env.sh" >&2
-  exit 1
+PYTHON=${PYTHON:-}
+if [ -z "$PYTHON" ]; then
+  for candidate in python3.12 python3.11 python3.10 python3; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      PYTHON=$candidate
+      break
+    fi
+  done
 fi
-[ -x "$GS_PYTHON" ] || { echo "GS_PYTHON is not an executable: $GS_PYTHON" >&2; exit 1; }
+"${PYTHON:-python3}" -I -c 'import sys; sys.exit(not ((3, 10) <= sys.version_info[:2] <= (3, 12)))' \
+  || { echo 'Install Python 3.10–3.12 with venv support, or set PYTHON to its executable.' >&2; exit 1; }
+for tool in git curl c++; do
+  command -v "$tool" >/dev/null 2>&1 || { echo "Missing build tool: $tool" >&2; exit 1; }
+done
+NVCC=${CUDA_HOME:+$CUDA_HOME/bin/nvcc}
+NVCC=${NVCC:-nvcc}
+command -v "$NVCC" >/dev/null 2>&1 \
+  || { echo 'Install the CUDA Toolkit (nvcc), or set CUDA_HOME to its directory.' >&2; exit 1; }
+CUDA_VERSION=$("$NVCC" --version | sed -n 's/.*release \([0-9]*\.[0-9]*\).*/\1/p')
+case "$CUDA_VERSION" in
+  11.8) TORCH=2.6.0; TORCHVISION=0.21.0; CUDA_WHEEL=cu118 ;;
+  12.1) TORCH=2.5.1; TORCHVISION=0.20.1; CUDA_WHEEL=cu121 ;;
+  12.4) TORCH=2.6.0; TORCHVISION=0.21.0; CUDA_WHEEL=cu124 ;;
+  12.6) TORCH=2.7.1; TORCHVISION=0.22.1; CUDA_WHEEL=cu126 ;;
+  12.8) TORCH=2.7.1; TORCHVISION=0.22.1; CUDA_WHEEL=cu128 ;;
+  *) echo "Unsupported CUDA Toolkit: $CUDA_VERSION. Use 11.8, 12.1, 12.4, 12.6 or 12.8." >&2; exit 1 ;;
+esac
+
+# Preserve environments created by the old installer; never inherit their packages.
+if [ -e "$VENV" ] || [ -L "$VENV" ]; then
+  if ! [ -x "$VENV/bin/python" ] || ! "$VENV/bin/python" -I -c '
+import pathlib, sys
+cfg = pathlib.Path(sys.prefix, "pyvenv.cfg").read_text().lower()
+assert sys.prefix != sys.base_prefix
+assert "include-system-site-packages = false" in cfg
+assert (3, 10) <= sys.version_info[:2] <= (3, 12)
+'; then
+    backup=$(mktemp -d "${VENV}.backup.XXXXXX")
+    mv -- "$VENV" "$backup/environment"
+    echo "Previous environment saved to $backup/environment"
+  fi
+fi
+[ -x "$VENV/bin/python" ] || "$PYTHON" -I -m venv "$VENV"
+PY="$VENV/bin/python"
+"$PY" -m pip install --upgrade pip 'setuptools>=68' wheel ninja
+"$PY" -m pip install "torch==$TORCH" "torchvision==$TORCHVISION" \
+  --index-url "https://download.pytorch.org/whl/$CUDA_WHEEL"
+"$PY" -c 'import torch; assert torch.cuda.is_available(), "CUDA GPU unavailable; check the NVIDIA driver."'
+"$PY" -m pip install --no-build-isolation --no-deps \
+  'git+https://github.com/graphdeco-inria/diff-gaussian-rasterization.git@59f5f77e3ddbac3ed9db93ec2cfe99ed6c5d121d'
+# Keep later dependency resolution from replacing the CUDA build of PyTorch.
+constraints=$(mktemp)
+trap 'rm -f "$constraints"' EXIT
+printf 'torch==%s\ntorchvision==%s\n' "$TORCH" "$TORCHVISION" > "$constraints"
+SAM2_BUILD_CUDA=0 "$PY" -m pip install --no-build-isolation -c "$constraints" -r requirements.txt
+"$PY" -m pip install --no-build-isolation --no-deps -e .
+
 CHECKPOINT_URL=https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_base_plus.pt
 CHECKPOINT=checkpoints/sam2.1_hiera_base_plus.pt
-
-[ -x "$VENV/bin/python" ] || "$GS_PYTHON" -m venv --system-site-packages "$VENV"
-source "$VENV/bin/activate"
-
-python -c "import torch, torchvision, diff_gaussian_rasterization" \
-  || { echo "base environment lacks torch, torchvision or diff_gaussian_rasterization" >&2; exit 1; }
-SAM2_BUILD_CUDA=0 python -m pip install --no-build-isolation -r requirements.txt
-python -m pip install --no-build-isolation --no-deps -e .
-
 mkdir -p checkpoints
-if [ ! -f "$CHECKPOINT" ]; then
+if [ ! -s "$CHECKPOINT" ]; then
   curl -L --fail --progress-bar -o "$CHECKPOINT.part" "$CHECKPOINT_URL"
   mv "$CHECKPOINT.part" "$CHECKPOINT"
 fi
-
-python -c "import torch, PySide6, sam2, diff_gaussian_rasterization; print('torch', torch.__version__, '| PySide6', PySide6.__version__, '| cuda', torch.cuda.is_available())"
+"$PY" -c "import torch, torchvision, PySide6, sam2, diff_gaussian_rasterization; print('Setup complete | torch', torch.__version__, '| CUDA', torch.cuda.is_available())"

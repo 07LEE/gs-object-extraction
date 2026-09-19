@@ -13,12 +13,10 @@ Extract an object from a trained 3D Gaussian Splatting scene and export it as a 
 
 ## Installation
 
-Requires a CUDA GPU and a Python environment with PyTorch, torchvision and `diff_gaussian_rasterization`, such as the one used to train Graphdeco 3DGS.
-
-Run from the repository root. The setup script creates `.venv-gpu` using that environment's packages, installs this tool and its dependencies, and downloads the SAM2 checkpoint.
+Run from the repository root to install dependencies and download SAM2:
 
 ```bash
-GS_PYTHON=/path/to/gs_train/bin/python scripts/setup_env.sh
+scripts/setup_env.sh
 source .venv-gpu/bin/activate
 ```
 
@@ -51,4 +49,4 @@ Surfaces missing from the source scene cannot be recovered. Thin structures such
 
 Licensing terms can be found in the [License File](LICENSE).
 
-Third-party dependencies are covered by their respective licenses, including [diff_gaussian_rasterization](https://github.com/graphdeco-inria/diff-gaussian-rasterization/blob/main/LICENSE.md) and [SAM2](https://github.com/facebookresearch/sam2/blob/2b90b9f5ceec907a1c18123530e92e794ad901a4/LICENSE).
+SAM2 is covered by its own [license](https://github.com/facebookresearch/sam2/blob/2b90b9f5ceec907a1c18123530e92e794ad901a4/LICENSE).
