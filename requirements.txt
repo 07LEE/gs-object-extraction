@@ -1,9 +1,8 @@
+# torch and torchvision are unpinned on purpose: install them first from the CUDA
+# wheel index that matches your setup (see README), and pip leaves them as they are.
+torch
+torchvision
 numpy>=1.24
-Pillow>=9.4
 PySide6-Essentials>=6.7
 SAM-2 @ git+https://github.com/facebookresearch/sam2.git@2b90b9f5ceec907a1c18123530e92e794ad901a4
-hydra-core>=1.3.2
 gsplat==1.5.3
-iopath>=0.1.10
-tqdm>=4.66.1
-pytest>=7
