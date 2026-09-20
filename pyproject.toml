@@ -14,9 +14,6 @@ dev = ["pytest>=7"]
 images = ["Pillow>=9"]
 gui = ["PySide6-Essentials>=6.7"]
 
-[project.scripts]
-gs-object-extraction = "gs_object_extraction.cli:main"
-
 [project.gui-scripts]
 gs-object-extraction-gui = "gs_object_extraction.app.main:main"
 

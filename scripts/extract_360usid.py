@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run ``gs-object-extraction extract`` on every 360-USID scene with a trained model and build a contact sheet.
+"""Extract the object from every 360-USID scene with a trained model and build a contact sheet.
 
     python scripts/extract_360usid.py --data-root DATA --output outputs/360usid
 

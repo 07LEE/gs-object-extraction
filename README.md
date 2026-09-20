@@ -1,19 +1,17 @@
 # 3D Gaussian Splatting Object Extraction
 
-Extract an object from a trained 3D Gaussian Splatting scene and export it as a standalone PLY. SAM2 segments rendered views to identify the object's Gaussians. No source photos are needed.
+Extract an object from a trained 3D Gaussian Splatting scene and export it as a standalone PLY. Open the scene in the viewer, click the object from a few angles, and SAM2 segments those views to identify the object's Gaussians. No source photos are needed.
 
 ![A scene and the object extracted from it, turning](docs/images/scene-and-object.webp)
 
-## How it works
+## Requirements
 
-1. Open a scene PLY and position the camera.
-2. Press **S** to enter select mode, then click the object. Review the SAM2 mask and press **Enter** to add the view.
-3. Repeat from several angles, then press **Ctrl+E** to extract the object.
-4. Review the preview and press **Ctrl+Shift+S** to export a PLY.
+- A CUDA GPU, Python 3.10–3.12 and the CUDA Toolkit.
+- A scene already trained with [Graphdeco 3DGS](https://github.com/graphdeco-inria/gaussian-splatting). The viewer opens its `point_cloud.ply`, normally at `output/<scene>/point_cloud/iteration_30000/point_cloud.ply`. Training a scene is out of scope for this tool.
 
 ## Installation
 
-Requires a CUDA GPU, Python 3.10–3.12 and the CUDA Toolkit. From the repository root, install PyTorch for your CUDA version (the index URL below is for CUDA 12.8), then the tool and the SAM2 checkpoint:
+From the repository root, install PyTorch for your CUDA version (the index URL below is for CUDA 12.8), then the tool and the SAM2 checkpoint:
 
 ```bash
 python3 -m venv .venv-gpu
@@ -28,30 +26,45 @@ curl -L -o checkpoints/sam2.1_hiera_base_plus.pt https://dl.fbaipublicfiles.com/
 
 gsplat compiles its CUDA kernels the first time a scene is opened, which takes a minute or two.
 
-## Viewer
+## Usage
 
-Open a `point_cloud.ply` produced by Graphdeco 3DGS:
+The viewer is the whole tool. With the environment active:
 
 ```bash
-gs-object-extraction-gui path/to/point_cloud.ply
+gs-object-extraction-gui
 ```
+
+*Open PLY...* in the File menu (Ctrl+O) opens a scene. A path on the command line opens it straight away, which saves the dialog when returning to the same scene.
 
 ![The viewer with one click on the object](docs/images/viewer.jpg)
 
-| Input | Action |
-| --- | --- |
-| Left drag, right drag, wheel | Orbit, pan, zoom |
-| Double-click (outside select mode) | Centre rotation on the point under the cursor |
-| S | Toggle select mode |
-| Left click, right click (select mode) | Add an object point or background point |
-| Backspace, Esc, Enter | Undo a point, clear the points, add the view |
-| Ctrl+E, Ctrl+Shift+S | Extract the object, export it as a PLY |
+1. **Frame the object.** Left drag to orbit, right drag to pan, wheel to zoom. Double-click the object to put the rotation centre on it, so orbiting keeps it in view.
+2. **Mark a view.** Press **S** for select mode, left-click the object, and SAM2 overlays a mask. Right-click anything the mask wrongly includes to push it back out. When the mask covers the object, press **Enter** to add the view. It joins the *Views* list in the right-hand panel.
+3. **Repeat from other angles.** About 16 views around the object is a useful starting point. Keep the camera low to reduce the ground included in the masks.
+4. **Extract.** Press **Ctrl+E** (or *Extract object* in the panel). The viewport switches to a preview of the object alone, which you can orbit like the scene, and the panel reports how many Gaussians were selected, removed and kept.
+5. **Export.** Press **Ctrl+Shift+S** to write the object as a PLY. The dialog offers `<scene>_object.ply` next to the source scene.
 
-- Mark views around the object; about 16 is a useful starting point. Keep the camera low to reduce ground included in the masks.
-- **Mark around the object (experimental)** adds views automatically from your existing selections. Review the results and rerun if parts of the object are missing.
-- **Edge trim** shrinks Gaussians that extend beyond the masks to reduce halos. Set it to `1.00` to preserve their size.
+### Keys
 
-Surfaces missing from the source scene cannot be recovered. Thin structures such as leaves may lose detail at the edges.
+| Input | Navigating | Select mode (S) |
+| --- | --- | --- |
+| Left drag, right drag, wheel | Orbit, pan, zoom | Orbit, pan, zoom |
+| Left click | — | Add an object point |
+| Right click | — | Add a background point |
+| Double-click | Centre rotation under the cursor | — |
+| Backspace, Esc | — | Undo a point, clear the points |
+| Enter | — | Add the view |
+| Ctrl+E, Ctrl+Shift+S | Extract the object, export a PLY | Extract the object, export a PLY |
+
+### Tuning the result
+
+Most of the panel says what it does, and the app carries tooltips. Three controls are worth knowing in advance, because they change the object you get:
+
+- **Mark around the object (experimental)** (*Object*) needs one marked view to start from, then marks a ring of views around the object on its own. Review the result and press it again to add another ring; each run keeps what is already marked.
+- **Off-mask limit** (*Extraction*) is read when extraction starts. Lower drops more Gaussians that stray outside the masks, at the cost of thinner edges. Changing it means extracting again.
+- **Edge trim** (*Extraction*) pulls in the Gaussians that reach past the masks and halo the object; `1.00` leaves them as they are. It applies to a finished object without re-extracting, and changes what is exported, not just the preview.
+
+Surfaces missing from the source scene cannot be recovered. An object photographed from one side stays hollow on the other, and thin structures such as leaves may lose detail at the edges.
 
 ## License
 
