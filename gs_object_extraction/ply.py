@@ -12,6 +12,7 @@ Writing replaces its target atomically and durably; see ``atomic``.
 from pathlib import Path
 
 import numpy as np
+from numpy.lib import recfunctions as rfn
 
 from .atomic import replace_atomically
 from .scene import GaussianScene, SUPPORTED_SH_COUNTS
@@ -157,10 +158,14 @@ def load_ply(path) -> GaussianScene:
             raise ValueError(f"unexpected Gaussian parameter fields: {sorted(malformed)}")
         vertices = _read_vertices(stream, fmt, count, properties)
 
-    def columns(prefix, size):
-        return np.column_stack([vertices[f"{prefix}{i}"] for i in range(size)]).astype(np.float64)
+    def fields(names, dtype=np.float64):
+        # One converting pass over the vertex records, not one strided pass per column.
+        return rfn.structured_to_unstructured(vertices[list(names)], dtype=dtype)
 
-    means = np.column_stack([vertices[name] for name in ("x", "y", "z")]).astype(np.float64)
+    def columns(prefix, size):
+        return fields(f"{prefix}{i}" for i in range(size))
+
+    means = fields(("x", "y", "z"))
     with np.errstate(over="ignore", under="ignore"):
         scales = np.exp(columns("scale_", 3))
     quaternions = columns("rot_", 4)
@@ -176,7 +181,7 @@ def load_ply(path) -> GaussianScene:
     sh[:, 0, :] = columns("f_dc_", 3)
     if rest_names:
         # Graphdeco stores all red coefficients, then green, then blue.
-        raw_rest = np.column_stack([vertices[name] for name in rest_names])
+        raw_rest = fields(rest_names, dtype=np.float32)
         sh[:, 1:, :] = raw_rest.reshape(count, 3, sh_count - 1).transpose(0, 2, 1)
     ids = None
     if "gaussian_id" in names:

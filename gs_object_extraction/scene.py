@@ -70,7 +70,8 @@ class GaussianScene:
             if ids.dtype.kind == "u" and np.any(ids > np.iinfo(np.int64).max):
                 raise ValueError("ids must fit signed 64-bit integers")
             self.ids = np.array(ids, dtype=np.int64, copy=True)
-        if len(np.unique(self.ids)) != n:
+        ordered = np.sort(self.ids)
+        if n and np.any(ordered[1:] == ordered[:-1]):
             raise ValueError("ids must be unique")
         extras = {}
         for name, values in (self.extras or {}).items():
