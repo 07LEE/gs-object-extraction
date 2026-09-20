@@ -5,12 +5,15 @@ little-endian PLY with float32 Gaussian parameters, preserving scalar extras
 and stable ``gaussian_id`` values. This is a semantic, not byte-exact roundtrip:
 raw rotations are normalized and activated opacity endpoints are clipped to
 float64 epsilon before conversion to finite logits.
+
+Writing replaces its target atomically and durably; see ``atomic``.
 """
 
 from pathlib import Path
 
 import numpy as np
 
+from .atomic import replace_atomically
 from .scene import GaussianScene, SUPPORTED_SH_COUNTS
 
 
@@ -218,8 +221,9 @@ def save_ply(scene: GaussianScene, path) -> None:
 
     Gaussian arrays use float32 on disk; extra floating arrays retain float64
     when applicable. Stable IDs use standard int32/uint32 PLY scalar storage.
+    The target is replaced atomically, so a failed write cannot damage it.
     """
-    # Revalidate mutable arrays before opening/truncating an existing output.
+    # Revalidate mutable arrays before doing any work towards the output.
     scene = scene.copy()
     fields = {name: scene.means[:, i] for i, name in enumerate(("x", "y", "z"))}
     fields.update({f"f_dc_{i}": scene.sh[:, 0, i] for i in range(3)})
@@ -251,6 +255,9 @@ def save_ply(scene: GaussianScene, path) -> None:
               f"element vertex {len(scene)}"]
     header.extend(f"property {type_name} {name}" for name, type_name, _ in properties)
     header.append("end_header")
-    with Path(path).open("wb") as stream:
+
+    def write(stream):
         stream.write(("\n".join(header) + "\n").encode("ascii"))
-        stream.write(vertices.tobytes())
+        vertices.tofile(stream)  # straight from the array, without copying the whole buffer
+
+    replace_atomically(path, write)

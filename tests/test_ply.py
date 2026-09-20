@@ -1,6 +1,11 @@
+import os
+import stat
+import time
+
 import numpy as np
 import pytest
 
+from gs_object_extraction import atomic
 from gs_object_extraction.ply import load_ply, save_ply
 from gs_object_extraction.scene import GaussianScene
 
@@ -157,3 +162,58 @@ def test_invalid_export_does_not_truncate_existing_file(tmp_path):
     with pytest.raises(ValueError, match="conflicts"):
         save_ply(scene, path)
     assert path.read_bytes() == b"original"
+
+
+def test_a_failed_write_keeps_the_previous_file_and_leaves_no_temporary(tmp_path, monkeypatch):
+    path = tmp_path / "object.ply"
+    path.write_bytes(b"previous export")
+    # A full disk usually surfaces on the flush, once the data is already written out.
+    monkeypatch.setattr(atomic.os, "fsync", lambda descriptor: (_ for _ in ()).throw(OSError("no space left")))
+    with pytest.raises(OSError, match="no space left"):
+        save_ply(make_scene(), path)
+    assert path.read_bytes() == b"previous export"
+    assert list(tmp_path.iterdir()) == [path]
+
+
+def test_save_flushes_the_data_and_the_directory_entry(tmp_path, monkeypatch):
+    synced = []
+    real = atomic.os.fsync
+    def record(descriptor):
+        synced.append(stat.S_ISDIR(os.fstat(descriptor).st_mode))
+        return real(descriptor)
+    monkeypatch.setattr(atomic.os, "fsync", record)
+    save_ply(make_scene(), tmp_path / "object.ply")
+    # The bytes first, then the rename that points at them.
+    assert synced == [False, True]
+
+
+def test_save_clears_a_killed_run_s_temporary_but_never_a_live_one(tmp_path):
+    path = tmp_path / "object.ply"
+    stale = tmp_path / f".{path.name}.abcdef.tmp"
+    stale.write_bytes(b"killed mid-export")
+    old = time.time() - atomic.STALE_SECONDS - 60
+    os.utime(stale, (old, old))
+    live = tmp_path / f".{path.name}.123456.tmp"  # another process, still writing
+    live.write_bytes(b"in flight")
+    unrelated = tmp_path / ".other.ply.abcdef.tmp"
+    unrelated.write_bytes(b"another target")
+    os.utime(unrelated, (old, old))
+
+    save_ply(make_scene(), path)
+    assert not stale.exists()
+    assert live.read_bytes() == b"in flight"
+    assert unrelated.read_bytes() == b"another target"
+    assert len(load_ply(path)) == 5
+
+
+def test_save_keeps_an_existing_targets_mode_and_is_private_until_complete(tmp_path):
+    shared = tmp_path / "shared.ply"
+    shared.write_bytes(b"previous export")
+    shared.chmod(0o640)
+    save_ply(make_scene(), shared)
+    assert stat.S_IMODE(shared.stat().st_mode) == 0o640
+    reference = tmp_path / "reference.txt"
+    reference.write_text("x")  # an ordinary new file gets the umask default
+    fresh = tmp_path / "fresh.ply"
+    save_ply(make_scene(), fresh)
+    assert stat.S_IMODE(fresh.stat().st_mode) == stat.S_IMODE(reference.stat().st_mode)

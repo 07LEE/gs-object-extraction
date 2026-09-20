@@ -15,6 +15,7 @@ import json
 from pathlib import Path
 import numpy as np
 from . import extract as ex
+from .atomic import replace_atomically
 from .model import point_cloud, training_roles
 from .ply import load_ply, save_ply
 from .usid import UsidScene, load_mask
@@ -46,11 +47,16 @@ def preview(renderer, camera, mask, before, after, path):
              for s, bg in ((before, (1, 1, 1)), (after, (1, 1, 1)), (after, (0, 0, 0)))]
     gap = np.full((tiles[0].shape[0], 6, 3), .5)
     row = np.concatenate([tiles[0], gap, tiles[1], gap, tiles[2]], axis=1)
-    Image.fromarray((row * 255).round().astype(np.uint8)).save(path)
+    image = Image.fromarray((row * 255).round().astype(np.uint8))
+    replace_atomically(path, lambda stream: image.save(stream, format="PNG"))
 
 
 def extract_scene(scene_dir, model_dir, output, **options):
-    """Write ``object.ply``, ``summary.json`` and ``preview.png`` for one scene; return the summary."""
+    """Write ``object.ply``, ``summary.json`` and ``preview.png`` for one scene; return the summary.
+
+    Every output is replaced atomically, so re-running into an existing folder either
+    leaves the previous result or overwrites it completely.
+    """
     from .renderer import GsplatRenderer
     train, held = usid_views(scene_dir, model_dir)
     scene = load_ply(point_cloud(model_dir))
@@ -66,7 +72,8 @@ def extract_scene(scene_dir, model_dir, output, **options):
     if held:
         camera, mask = max(held, key=lambda view: np.count_nonzero(view[1]))
         preview(renderer, camera, mask, stages["selected"], stages["cleaned"], output / "preview.png")
-    (output / "summary.json").write_text(json.dumps(summary, indent=1) + "\n")
+    replace_atomically(output / "summary.json",
+                       lambda stream: stream.write((json.dumps(summary, indent=1) + "\n").encode()))
     return summary
 
 
