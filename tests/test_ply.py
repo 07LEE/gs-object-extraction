@@ -1,5 +1,8 @@
 import os
+from pathlib import Path
 import stat
+import subprocess
+import sys
 import time
 
 import numpy as np
@@ -217,3 +220,39 @@ def test_save_keeps_an_existing_targets_mode_and_is_private_until_complete(tmp_p
     fresh = tmp_path / "fresh.ply"
     save_ply(make_scene(), fresh)
     assert stat.S_IMODE(fresh.stat().st_mode) == stat.S_IMODE(reference.stat().st_mode)
+
+
+def header_properties(path):
+    data = Path(path).read_bytes()
+    lines = data[:data.index(b"end_header")].decode("ascii").splitlines()
+    return [line.split()[2] for line in lines if line.startswith("property")]
+
+
+def test_extras_keep_the_column_order_the_file_declares(tmp_path):
+    scene = make_scene()
+    first = tmp_path / "first.ply"
+    save_ply(scene, first)
+    declared = header_properties(first)
+    loaded = load_ply(first)
+    assert list(loaded.extras) == [name for name in declared if name in scene.extras]
+    # Writing a loaded scene back out reproduces the same columns in the same places.
+    again = tmp_path / "again.ply"
+    save_ply(loaded, again)
+    assert header_properties(again) == declared
+
+
+def test_saving_a_loaded_scene_is_reproducible_across_processes(tmp_path):
+    """Set iteration order depends on the hash seed, so this needs separate processes."""
+    path = tmp_path / "scene.ply"
+    save_ply(make_scene(), path)
+    program = ("import sys, hashlib;"
+               "from gs_object_extraction.ply import load_ply, save_ply;"
+               "out = sys.argv[1] + '.out';"
+               "save_ply(load_ply(sys.argv[1]), out);"
+               "print(hashlib.sha256(open(out, 'rb').read()).hexdigest())")
+    digests = set()
+    for seed in ("0", "1", "12345"):
+        result = subprocess.run([sys.executable, "-c", program, str(path)], capture_output=True,
+                                text=True, check=True, env={**os.environ, "PYTHONHASHSEED": seed})
+        digests.add(result.stdout.strip())
+    assert len(digests) == 1, f"the written file varies with the hash seed: {digests}"

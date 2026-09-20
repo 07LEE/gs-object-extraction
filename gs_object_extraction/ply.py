@@ -4,7 +4,8 @@ Reads ASCII and binary little-endian scalar vertex properties. Writes binary
 little-endian PLY with float32 Gaussian parameters, preserving scalar extras
 and stable ``gaussian_id`` values. This is a semantic, not byte-exact roundtrip:
 raw rotations are normalized and activated opacity endpoints are clipped to
-float64 epsilon before conversion to finite logits.
+float64 epsilon before conversion to finite logits. Extra columns keep the order
+the file declares them in, so writing a loaded scene back out is reproducible.
 
 Writing replaces its target atomically and durably; see ``atomic``.
 """
@@ -192,7 +193,8 @@ def load_ply(path) -> GaussianScene:
             if np.any(values < -(2.0**63)) or np.any(values >= 2.0**63):
                 raise ValueError("gaussian_id values exceed signed 64-bit range")
         ids = values.astype(np.int64)
-    extras = {name: vertices[name].copy() for name in names - reserved}
+    # Declared order, not set order: it keeps the file's columns and makes saving reproducible.
+    extras = {name: vertices[name].copy() for name, _ in properties if name not in reserved}
     return GaussianScene(means, scales, quaternions, opacities, sh, ids, extras)
 
 
