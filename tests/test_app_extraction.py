@@ -158,6 +158,7 @@ def make_window(app, tmp_path, dialogs):
         renderer.release.set()
         window.cancel_extraction()
         wait_until(app, lambda: window.extraction_job is None)
+        wait_until(app, lambda: window.export_job is None)
         window.close()
     app.processEvents()
 
@@ -166,6 +167,14 @@ def extract_object(app, window):
     window.start_extraction()
     assert window.extraction_job is not None
     wait_until(app, lambda: window.extraction_job is None)
+
+
+def export_object(app, window, path):
+    """Run one export to completion, returning whether it started."""
+    started = window.export_ply(path)
+    if started:
+        wait_until(app, lambda: window.export_job is None)
+    return started
 
 
 def test_extract_cleans_hidden_fragments_previews_and_exports_full_gaussians(app, make_window, tmp_path, dialogs):
@@ -205,7 +214,7 @@ def test_extract_cleans_hidden_fragments_previews_and_exports_full_gaussians(app
     assert renderer.image_calls[-1] == (None, BACKGROUND)
     assert window.select_action.isEnabled() and not window.background_box.isEnabled()
     assert window.export_action.isEnabled()
-    assert window.export_ply(tmp_path / "object.ply")
+    assert export_object(app, window, tmp_path / "object.ply")
     exported = load_ply(tmp_path / "object.ply")
     for name in ("means", "scales", "quaternions", "opacities", "sh"):
         np.testing.assert_allclose(getattr(exported, name), getattr(original, name)[CLEANED],
@@ -270,7 +279,7 @@ def test_the_edge_trim_pulls_in_what_reaches_past_the_masks(app, make_window, tm
                    for name in ("means", "scales", "rotations", "opacities", "sh")]
     np.testing.assert_allclose(shown.scales[0], original.scales[0] * TRIM)
     np.testing.assert_allclose(shown.scales[1], original.scales[1])
-    assert window.export_ply(tmp_path / "trimmed.ply")
+    assert export_object(app, window, tmp_path / "trimmed.ply")
     exported = load_ply(tmp_path / "trimmed.ply")
     np.testing.assert_allclose(exported.scales[0], original.scales[0] * TRIM, rtol=3e-7)
     np.testing.assert_allclose(exported.scales[1], original.scales[1], rtol=3e-7)
@@ -284,7 +293,7 @@ def test_the_edge_trim_pulls_in_what_reaches_past_the_masks(app, make_window, tm
         assert window.viewport.renderer is renderer and window.object_scene is shown
         np.testing.assert_allclose(shown.scales, expected)
         np.testing.assert_array_equal(window.scene.scales, original.scales)
-        assert window.export_ply(tmp_path / "adjusted.ply")
+        assert export_object(app, window, tmp_path / "adjusted.ply")
         np.testing.assert_allclose(load_ply(tmp_path / "adjusted.ply").scales, expected, rtol=3e-7)
         if cuda:
             assert buffers == [getattr(renderer, name).data_ptr()
@@ -296,7 +305,7 @@ def test_the_edge_trim_pulls_in_what_reaches_past_the_masks(app, make_window, tm
                 fresh.render_image(camera, background=window.viewport.background))
             for actual, reference in zip(renderer.depth_image(camera), fresh.depth_image(camera)):
                 np.testing.assert_allclose(actual, reference)
-    assert window.export_ply(tmp_path / "whole.ply")
+    assert export_object(app, window, tmp_path / "whole.ply")
     np.testing.assert_allclose(load_ply(tmp_path / "whole.ply").scales, original.scales[CLEANED], rtol=3e-7)
     assert not dialogs
 
@@ -342,7 +351,7 @@ def test_preview_controls_and_export_preserve_world_coordinates(app, make_window
             np.testing.assert_array_equal(renderer.scales.cpu().numpy(), shown.scales.astype(np.float32))
 
         path = tmp_path / f"axis_{index}.ply"
-        assert window.export_ply(path)
+        assert export_object(app, window, path)
         exported = load_ply(path)
         np.testing.assert_array_equal(exported.ids, original.ids[selected])
         # PLY stores coordinates as float32; no coordinate transform is allowed.
@@ -365,7 +374,7 @@ def test_trim_changed_in_scene_mode_is_used_for_export_and_next_preview(app, mak
     window.preview_box.setCurrentText("Scene")
     window.trim_box.setValue(.5)
     assert window.viewport.renderer is renderer and window.object_scene is None
-    assert window.export_ply(tmp_path / "object.ply")
+    assert export_object(app, window, tmp_path / "object.ply")
     exported = load_ply(tmp_path / "object.ply")
     window.preview_box.setCurrentText("Object only")
     np.testing.assert_allclose(window.object_scene.scales, exported.scales, rtol=3e-7)
@@ -478,6 +487,31 @@ def test_close_waits_for_worker_cancellation_before_destroying_window(app, make_
     assert not dialogs
 
 
+def test_close_lets_a_running_export_finish_writing_the_file(app, make_window, tmp_path, monkeypatch, dialogs):
+    window, _ = make_window()
+    extract_object(app, window)
+    started, release = threading.Event(), threading.Event()
+
+    def slow(scene, path):
+        started.set()
+        assert release.wait(5), "test did not release the export"
+        save_ply(scene, path)
+
+    monkeypatch.setattr("gs_object_extraction.app.export.save_ply", slow)
+    target = tmp_path / "object.ply"
+    try:
+        assert window.export_ply(target)
+        wait_until(app, started.is_set)
+        assert not window.close()  # an interrupted write would leave nothing to keep
+        assert window.isVisible() and window.export_job is not None
+        release.set()
+        wait_until(app, lambda: window.export_job is None and not window.isVisible())
+    finally:
+        release.set()
+    assert len(load_ply(target)) == int(CLEANED.sum())
+    assert not dialogs
+
+
 def test_empty_extraction_has_no_preview_or_export(app, make_window, tmp_path, dialogs):
     window, _ = make_window(FakeRenderer(empty=True))
     extract_object(app, window)
@@ -488,25 +522,51 @@ def test_empty_extraction_has_no_preview_or_export(app, make_window, tmp_path, d
     assert not window.export_ply(tmp_path / "empty.ply") and not dialogs
 
 
-def test_export_failure_preserves_existing_target_and_result(app, make_window, tmp_path, monkeypatch, dialogs):
+def test_a_failed_export_is_reported_and_leaves_the_window_usable(app, make_window, tmp_path, monkeypatch, dialogs):
+    """``save_ply`` keeps the target intact itself (see test_ply); the window has to say so."""
     window, _ = make_window()
     extract_object(app, window)
     target = tmp_path / "object.ply"
     target.write_bytes(b"previous export")
     before = set(tmp_path.iterdir())
 
-    def fail_after_partial_write(scene, path):
-        path.write_bytes(b"partial output")
+    def fail(scene, path):
         raise OSError("test disk write failure")
 
-    monkeypatch.setattr("gs_object_extraction.app.window.save_ply", fail_after_partial_write)
-    assert not window.export_ply(target)
+    monkeypatch.setattr("gs_object_extraction.app.export.save_ply", fail)
+    assert export_object(app, window, target)  # started, then failed on the worker
     assert target.read_bytes() == b"previous export"
     assert set(tmp_path.iterdir()) == before
     np.testing.assert_array_equal(window.stages["cleaned"], CLEANED)
-    assert window.export_action.isEnabled()
+    assert window.export_action.isEnabled() and not window.progress.isVisible()
     assert dialogs == [("Cannot export object", "test disk write failure")]
-    assert QApplication.overrideCursor() is None
+
+
+def test_an_export_runs_off_the_gui_thread_and_locks_the_controls_while_it_does(
+        app, make_window, tmp_path, monkeypatch, dialogs):
+    window, _ = make_window()
+    extract_object(app, window)
+    threads, release = [], threading.Event()
+
+    def slow(scene, path):
+        threads.append(threading.get_ident())
+        assert release.wait(5), "test did not release the export"
+        save_ply(scene, path)
+
+    monkeypatch.setattr("gs_object_extraction.app.export.save_ply", slow)
+    try:
+        assert window.export_ply(tmp_path / "object.ply")
+        wait_until(app, lambda: bool(threads))
+        assert threads[0] != threading.get_ident()  # the GUI thread is free while it writes
+        assert not window.export_action.isEnabled() and not window.open_action.isEnabled()
+        assert not window.preview_box.isEnabled() and window.progress.isVisible()
+        release.set()
+        wait_until(app, lambda: window.export_job is None)
+    finally:
+        release.set()
+    assert window.export_action.isEnabled() and not window.progress.isVisible()
+    assert len(load_ply(tmp_path / "object.ply")) == int(CLEANED.sum())
+    assert not dialogs
 
 
 def test_export_rejects_other_extension_without_overwriting_a_different_filename(app, make_window, tmp_path, dialogs):
@@ -545,12 +605,12 @@ def test_export_uses_the_default_file_mode_and_keeps_an_existing_targets_mode(ap
     reference = tmp_path / "reference.txt"
     reference.write_text("x")  # an ordinary new file gets the umask default
     fresh = tmp_path / "fresh.ply"
-    assert window.export_ply(fresh)
+    assert export_object(app, window, fresh)
     assert stat.S_IMODE(fresh.stat().st_mode) == stat.S_IMODE(reference.stat().st_mode)
     shared = tmp_path / "shared.ply"
     shared.write_text("previous export")
     shared.chmod(0o664)
-    assert window.export_ply(shared)
+    assert export_object(app, window, shared)
     assert stat.S_IMODE(shared.stat().st_mode) == 0o664 and not dialogs
 
 

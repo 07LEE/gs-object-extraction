@@ -1,18 +1,15 @@
 """Mark an object in several views, extract it, preview it and export a Gaussian PLY."""
 
-import os
 from pathlib import Path
-import stat
-import tempfile
 import numpy as np
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QKeySequence
-from PySide6.QtWidgets import (QApplication, QComboBox, QDockWidget, QDoubleSpinBox, QFileDialog, QFormLayout,
+from PySide6.QtWidgets import (QComboBox, QDockWidget, QDoubleSpinBox, QFileDialog, QFormLayout,
                                QGroupBox, QLabel, QListWidget, QMainWindow, QMessageBox, QProgressBar, QPushButton,
                                QScrollArea, QToolButton, QVBoxLayout, QWidget)
-from ..ply import save_ply
 from ..extract import OFF_MASK, TRIM, trim_scales
 from .autoviews import AutoMarkJob, VIEWS
+from .export import ExportJob
 from .extraction import ExtractionJob
 from .loading import SceneLoadJob, SegmenterLoadJob
 from .orbit import AXES, DEFAULT_UP, Orbit
@@ -27,14 +24,6 @@ SELECT_HINT = ("Left click: object point   Right click: background point   Backs
 PREVIEW_HINT = "Object preview   Drag: orbit / pan   Wheel: zoom   Ctrl+Shift+S: export"
 
 
-
-def _file_mode(path):
-    """Mode for a written file: keep an existing target's mode, otherwise the umask default."""
-    if path.exists():
-        return stat.S_IMODE(path.stat().st_mode)
-    umask = os.umask(0)
-    os.umask(umask)
-    return 0o666 & ~umask
 
 class MainWindow(QMainWindow):
     def __init__(self, checkpoint=DEFAULT_CHECKPOINT):
@@ -51,6 +40,7 @@ class MainWindow(QMainWindow):
         self.stages = None
         self.extraction_job = None
         self.auto_job = None
+        self.export_job = None
         self.load_job = None
         self.model_job = None
         self._close_pending = False
@@ -358,7 +348,8 @@ class MainWindow(QMainWindow):
             self.update_extraction_state()
 
     def update_extraction_state(self, *_):
-        busy = self.extraction_job is not None or self.auto_job is not None or self.load_job is not None
+        busy = (self.extraction_job is not None or self.auto_job is not None
+                or self.load_job is not None or self.export_job is not None)
         ready = self.scene is not None and self.scene_renderer is not None and bool(self.views) and not busy
         self.auto_button.setEnabled(ready and self.viewport.active is None)
         result = self.stages is not None and bool(self.stages["cleaned"].any())
@@ -589,34 +580,51 @@ class MainWindow(QMainWindow):
             self.export_ply(dialog.selectedFiles()[0])
 
     def export_ply(self, path):
-        """Atomically save the cleaned subset, retaining Gaussian IDs and all attributes."""
-        if self.extraction_job is not None or self.scene is None or self.stages is None or not self.stages["cleaned"].any():
+        """Start saving the cleaned subset, retaining Gaussian IDs and all attributes.
+
+        Returns whether the export began; ``save_ply`` replaces the target atomically,
+        so a failure on the worker leaves whatever was there before untouched.
+        """
+        if (self.extraction_job is not None or self.export_job is not None or self.scene is None
+                or self.stages is None or not self.stages["cleaned"].any()):
             return False
         path = Path(path)
-        temporary = error = None
-        QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             if path.suffix.lower() != ".ply":
                 raise ValueError("Use the .ply file extension for the object export.")
             if self.source_path is not None and (path.resolve() == self.source_path
                     or (path.exists() and self.source_path.exists() and path.samefile(self.source_path))):
                 raise ValueError("Choose a different file from the source scene.")
-            with tempfile.NamedTemporaryFile(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent, delete=False) as stream:
-                temporary = Path(stream.name)
-            save_ply(self.trimmed_object(), temporary)
-            os.chmod(temporary, _file_mode(path))  # the temporary file is private (0600) until now
-            os.replace(temporary, path)
         except Exception as exc:
-            error = str(exc)
-        finally:
-            if temporary is not None:
-                temporary.unlink(missing_ok=True)
-            QApplication.restoreOverrideCursor()  # before the dialog, so it does not show a wait cursor
-        if error is not None:
-            QMessageBox.warning(self, "Cannot export object", error)
+            QMessageBox.warning(self, "Cannot export object", str(exc))
             return False
-        self.statusBar().showMessage(f"Saved {int(self.stages['cleaned'].sum()):,} Gaussians to {path}")
+        job = ExportJob(self.trimmed_object(), path, self)  # a private copy of the object
+        self.export_job = job
+        job.succeeded.connect(self.export_succeeded)
+        job.failed.connect(self.export_failed)
+        job.finished.connect(self.export_finished)
+        self.progress.setRange(0, 0)
+        self.progress.show()
+        self.statusBar().showMessage(f"Saving to {path}...")
+        self.update_extraction_state()
+        job.start()
         return True
+
+    def export_succeeded(self, written, path):
+        self.statusBar().showMessage(f"Saved {written:,} Gaussians to {path}")
+
+    def export_failed(self, message):
+        self.statusBar().showMessage("Export failed")
+        if not self._close_pending:
+            QMessageBox.warning(self, "Cannot export object", message)
+
+    def export_finished(self):
+        job, self.export_job = self.export_job, None
+        job.deleteLater()
+        self.progress.hide()
+        self.update_extraction_state()
+        if self._close_pending:
+            self.close()
 
     def closeEvent(self, event):
         """Let a running thread finish first: Qt cannot destroy one that is still working."""
@@ -631,6 +639,13 @@ class MainWindow(QMainWindow):
                 if job is not None:
                     job.requestInterruption()
             self.statusBar().showMessage("Finishing the current step before closing...")
+            event.ignore()
+            return
+        if self.export_job is not None:
+            # Let it finish rather than interrupt it: a half-written export is no use,
+            # and the write is short next to the extraction that produced it.
+            self._close_pending = True
+            self.statusBar().showMessage("Finishing the export before closing...")
             event.ignore()
             return
         super().closeEvent(event)
