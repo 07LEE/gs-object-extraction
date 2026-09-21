@@ -42,6 +42,8 @@ class MainWindow(QMainWindow):
         self.auto_job = None
         self.export_job = None
         self.load_job = None
+        self._shown_file = ("-", "")
+        self._kept = None  # the open work, set aside while a new scene goes up
         self.model_job = None
         self._close_pending = False
         self.viewport = Viewport(self)
@@ -193,18 +195,14 @@ class MainWindow(QMainWindow):
         """Start loading in the background; the scene is replaced only once it is read."""
         if self.extraction_job is not None or self.load_job is not None:
             return False
-        self.scene = self.scene_renderer = self.source_path = None
-        self.invalidate_result()
-        self.views.clear()
-        self.view_list.clear()
-        self.viewport.clear()  # release the previous scene's GPU memory first
+        self._shown_file = (self.file_label.text(), self.file_label.toolTip())  # what a failed read puts back
         self.file_label.setText(Path(path).name)
         self.file_label.setToolTip(str(path))
-        self.count_label.setText("-")
         chosen = None if self.up_box.currentText() == "Auto" else self.up_vector()
         job = SceneLoadJob(path, chosen, self)
         self.load_job = job
         job.progress.connect(lambda stage: self.statusBar().showMessage(f"{stage}..."))
+        job.read.connect(lambda: self.release_scene(job))
         job.succeeded.connect(self.scene_loaded)
         job.failed.connect(lambda message: self.scene_load_failed(path, message))
         job.finished.connect(self.load_finished)
@@ -214,7 +212,44 @@ class MainWindow(QMainWindow):
         job.start()
         return True
 
+    def release_scene(self, job):
+        """The file read fine: drop the open scene so its GPU memory is free before the new one goes up."""
+        if self.scene is not None:
+            # Only the GPU side is dropped; the CPU data and the work stay here in case the upload fails.
+            self._kept = dict(scene=self.scene, source_path=self.source_path, views=list(self.views),
+                              items=[self.view_list.item(row).text() for row in range(self.view_list.count())],
+                              row=self.view_list.currentRow(), stages=self.stages, auto_up=self.auto_up,
+                              orbit=self.viewport.orbit or (self._kept or {}).get("orbit"), count=self.count_label.text(),
+                              result=self.result_label.text(), preview=self.preview_box.currentIndex())
+        self.scene = self.scene_renderer = self.source_path = None
+        self.invalidate_result()
+        self.views.clear()
+        self.view_list.clear()
+        self.viewport.clear()
+        self.count_label.setText("-")
+        job.release()
+
+    def restore_kept(self):
+        """The new scene did not fit or could not be uploaded: bring the previous work back."""
+        kept = self._kept
+        # The CPU side comes back first: if the GPU still cannot hold the scene, the work can still be exported.
+        self.scene, self.source_path, self.auto_up = kept["scene"], kept["source_path"], kept["auto_up"]
+        self.views.extend(kept["views"])
+        self.view_list.addItems(kept["items"])
+        self.view_list.setCurrentRow(kept["row"])
+        self.count_label.setText(kept["count"])
+        self.stages = kept["stages"]
+        self.result_label.setText(kept["result"])
+        self.update_extraction_state()
+        renderer = self._renderer_for(kept["scene"])  # raises while the GPU cannot take it; _kept stays for the next try
+        self._kept = None
+        self.scene_renderer = renderer
+        self.viewport.set_scene(renderer, kept["orbit"])
+        self.preview_box.setCurrentIndex(kept["preview"])  # shows the object again when it was on screen
+        self.update_extraction_state()
+
     def scene_loaded(self, scene, renderer, up, orbit):
+        self._kept = None
         self.scene = scene
         self.source_path = Path(self.load_job.path).resolve()
         self.count_label.setText(f"{len(scene.means):,}")
@@ -224,9 +259,15 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Opened {self.source_path.name}: {len(scene.means):,} Gaussians")
 
     def scene_load_failed(self, path, message):
-        self.file_label.setText("-")
-        self.file_label.setToolTip("")
+        self.file_label.setText(self._shown_file[0])
+        self.file_label.setToolTip(self._shown_file[1])
         self.statusBar().showMessage("Could not open the file")
+        if self._kept is not None and self.scene is None:  # None: it was released, so it has to come back
+            try:
+                self.restore_kept()
+            except Exception as exc:  # the old scene no longer fits either: keep its data, drop its view
+                message += (f" (the previous scene could not be shown again: {exc}. "
+                            "Its views and result are kept; open a file to try again, or export the object.)")
         if not self._close_pending:
             QMessageBox.critical(self, "Cannot open file", f"{Path(path).name}: {message}")
 
@@ -430,6 +471,7 @@ class MainWindow(QMainWindow):
         if showing:
             self.set_selecting(False)
             object_scene = self.trimmed_object()
+            self.viewport.set_preview(renderer=self.scene_renderer)  # the old object's GPU copy goes before the new one comes
             try:
                 renderer = self._renderer_for(object_scene)
             except Exception as exc:  # a scene that fits the GPU can still fail to make room for a copy

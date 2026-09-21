@@ -614,3 +614,60 @@ def test_sam2_checkpoint_option_reaches_the_window(app, monkeypatch):
     monkeypatch.setattr(main_module, "MainWindow", FakeWindow)
     assert main_module.main(["scene.ply", "--sam2-checkpoint", "/w/sam2.1_hiera_large.pt"]) == 0
     assert made == {"checkpoint": "/w/sam2.1_hiera_large.pt", "ply": "scene.ply"}
+
+
+def test_a_file_that_cannot_be_read_leaves_the_open_scene_alone(app, tmp_path, monkeypatch):
+    monkeypatch.setattr("gs_object_extraction.app.window.QMessageBox.critical", lambda *args: None)
+    window = MainWindow()
+    window.scene = object()
+    window.file_label.setText("kept.ply")
+    window.views.append(object())
+    bad = tmp_path / "bad.ply"
+    bad.write_text("not a ply")
+    open_and_wait(window, bad)
+    assert window.scene is not None and len(window.views) == 1 and window.file_label.text() == "kept.ply"
+
+
+def test_a_failed_upload_brings_the_previous_work_back(app, tmp_path, monkeypatch):
+    def failing_upload(scene):
+        raise RuntimeError("CUDA out of memory")
+
+    monkeypatch.setattr("gs_object_extraction.app.window.QMessageBox.critical", lambda *args: None)
+    monkeypatch.setattr("gs_object_extraction.app.loading.load_ply", lambda path: GaussianScene.from_colors(
+        np.zeros((2, 3)), np.full((2, 3), .1), np.full((2, 3), .5), np.full(2, .9)))
+    monkeypatch.setattr("gs_object_extraction.renderer.GsplatRenderer", failing_upload)
+    old = GaussianScene.from_colors(np.zeros((4, 3)), np.full((4, 3), .1), np.full((4, 3), .5), np.full(4, .9))
+    window = MainWindow()
+    window.renderer_factory = lambda scene: ShiftingRenderer()
+    window.scene, window.scene_renderer, window.source_path = old, ShiftingRenderer(), tmp_path / "old.ply"
+    window.file_label.setText("old.ply")
+    window.count_label.setText("4")
+    window.views.append(object())
+    window.view_list.addItem("View 1: 9 px")
+    assert open_and_wait(window, tmp_path / "new.ply")
+    assert window.scene is old and window.source_path == tmp_path / "old.ply"
+    assert len(window.views) == 1 and window.view_list.count() == 1
+    assert window.file_label.text() == "old.ply" and window.count_label.text() == "4"
+    assert window.viewport.renderer is window.scene_renderer is not None
+
+
+def test_a_restore_that_fails_keeps_the_work_for_another_try(app, tmp_path, monkeypatch):
+    def failing_upload(scene):
+        raise RuntimeError("CUDA out of memory")
+
+    monkeypatch.setattr("gs_object_extraction.app.window.QMessageBox.critical", lambda *args: None)
+    monkeypatch.setattr("gs_object_extraction.app.loading.load_ply", lambda path: GaussianScene.from_colors(
+        np.zeros((2, 3)), np.full((2, 3), .1), np.full((2, 3), .5), np.full(2, .9)))
+    monkeypatch.setattr("gs_object_extraction.renderer.GsplatRenderer", failing_upload)
+    old = GaussianScene.from_colors(np.zeros((4, 3)), np.full((4, 3), .1), np.full((4, 3), .5), np.full(4, .9))
+    window = MainWindow()
+    window.renderer_factory = failing_upload
+    window.scene, window.scene_renderer, window.source_path = old, ShiftingRenderer(), tmp_path / "old.ply"
+    window.views.append(object())
+    window.view_list.addItem("View 1: 9 px")
+    open_and_wait(window, tmp_path / "new.ply")
+    assert window.scene is old and len(window.views) == 1 and window.scene_renderer is None
+    window.renderer_factory = lambda scene: ShiftingRenderer()  # the GPU has room again
+    open_and_wait(window, tmp_path / "new.ply")  # another failed open: the views must not be doubled
+    assert window.scene is old and len(window.views) == 1 and window.view_list.count() == 1
+    assert window.scene_renderer is not None and window._kept is None

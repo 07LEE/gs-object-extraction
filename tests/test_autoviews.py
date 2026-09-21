@@ -286,3 +286,23 @@ def test_cancelling_stops_the_ring(app):
     job.wait(1000)
     app.processEvents()
     assert cancelled and len(segmenter.keys) < VIEWS  # it stopped instead of finishing the ring
+
+
+def test_cancelling_during_preparation_stops_before_the_next_view_is_lifted(app):
+    class Counting(Renderer):
+        lifts = 0
+
+        def lift(self, *args, **kwargs):
+            Counting.lifts += 1
+            job.requestInterruption()  # the user cancels during the first lift
+            return super().lift(*args, **kwargs)
+
+    means = np.concatenate([np.zeros((3, 3)), np.full((3, 3), 20.)])
+    views = [marked_view()] * 5
+    job = AutoMarkJob(Counting(), Segmenter(), means, views, (0., 1., 0.), SIZE, count=4)
+    cancelled = []
+    job.cancelled.connect(lambda: cancelled.append(True))
+    job.start()
+    assert job.wait(5000)
+    app.processEvents()
+    assert cancelled and Counting.lifts == 1

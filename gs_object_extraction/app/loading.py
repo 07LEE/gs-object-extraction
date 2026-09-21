@@ -1,6 +1,7 @@
 """Background loading, so the window keeps painting while a scene or SAM2 comes up."""
 
 from PySide6.QtCore import QThread, Signal
+from threading import Event
 from ..ply import load_ply
 from .orbit import Orbit, estimate_up, frame_scene
 
@@ -13,6 +14,7 @@ class SceneLoadJob(QThread):
     """
 
     progress = Signal(str)  # the stage now running
+    read = Signal()  # the file is a valid scene; the window frees the old one, then calls release()
     succeeded = Signal(object, object, object, object)  # scene, renderer, estimated up axis, first view
     failed = Signal(str)
 
@@ -20,12 +22,20 @@ class SceneLoadJob(QThread):
         super().__init__(parent)
         self.path = path
         self.chosen_up = chosen_up  # None follows the estimate, as the Auto up axis does
+        self._released = Event()
+
+    def release(self):
+        self._released.set()
 
     def run(self):
         from ..renderer import GsplatRenderer
         try:
             self.progress.emit("Reading the PLY")
             scene = load_ply(self.path)
+            self.read.emit()  # a file that fails to read never costs the user the scene that is open
+            while not self._released.wait(.05):
+                if self.isInterruptionRequested():
+                    return
             if self.isInterruptionRequested():
                 return
             self.progress.emit("Uploading to the GPU")

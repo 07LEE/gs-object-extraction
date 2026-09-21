@@ -26,7 +26,7 @@ DEEP = 8  # click this far inside the outline where the silhouette is wide enoug
 MAX_FILL = .2  # back the ring off until the object takes at most this much of the frame
 
 
-def surface_points(renderer, views, step=4):
+def surface_points(renderer, views, step=4, on_view=None):
     """Points on the object's visible surface, unprojected from the masks the user marked.
 
     Lifting from a single view also takes in what stands behind the object, so
@@ -35,6 +35,8 @@ def surface_points(renderer, views, step=4):
     """
     points = []
     for camera, mask in views:
+        if on_view is not None:
+            on_view()
         depth, alpha = renderer.depth_image(camera)
         ys, xs = np.nonzero(mask[::step, ::step] & (alpha[::step, ::step] > .5))
         if not len(ys):
@@ -122,6 +124,10 @@ def usable(mask, sits_on):
     return mask is not None and mask.any() and sits_on >= MIN_AGREE and mask.mean() <= MAX_FRAME
 
 
+class _Cancelled(Exception):
+    pass
+
+
 class AutoMarkJob(QThread):
     """Select from the views marked so far, then mark a ring of views around the object."""
 
@@ -138,14 +144,18 @@ class AutoMarkJob(QThread):
         self.up, self.size = up, size
         self.count, self.pitch = count, pitch
 
+    def check(self):
+        if self.isInterruptionRequested():
+            raise _Cancelled
+
     def run(self):
         try:
             marked, skipped = [], 0
             run = object()  # keys this run's views apart from every earlier run's
-            selection = select(lift_masks(self.renderer, self.views))
+            selection = select(lift_masks(self.renderer, self.views, on_view=self.check))
             if not selection.any():
                 raise ValueError("The marked views do not select any Gaussian yet. Mark the object more closely first.")
-            centre, radius = object_frame(surface_points(self.renderer, self.views))
+            centre, radius = object_frame(surface_points(self.renderer, self.views, on_view=self.check))
             # A selection lifted from one view trails off behind the object; only what sits
             # around the object says where it lands on screen.
             near = selection & (np.linalg.norm(np.asarray(self.means) - centre, axis=1) <= NEAR * radius)
@@ -158,9 +168,7 @@ class AutoMarkJob(QThread):
                     break
                 radius *= 1.4
             for index, orbit in enumerate(ring(centre, radius, self.up, count=self.count, pitch=self.pitch)):
-                if self.isInterruptionRequested():
-                    self.cancelled.emit()
-                    return
+                self.check()
                 camera = orbit.camera(width, height)
                 silhouette = np.clip(self.renderer.alpha_image(camera, active=near), 0, 1) > .5
                 if silhouette.sum() < MIN_PIXELS:
@@ -175,6 +183,8 @@ class AutoMarkJob(QThread):
                     else:
                         skipped += 1
                 self.progress.emit(index + 1, self.count)
+        except _Cancelled:
+            self.cancelled.emit()
         except Exception as exc:
             self.failed.emit(str(exc))
         else:

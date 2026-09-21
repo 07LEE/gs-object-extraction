@@ -660,3 +660,20 @@ def test_off_mask_limit_from_the_panel_reaches_the_extraction(app, make_window, 
     window.off_threshold_box.setValue(.35)
     extract_object(app, window)
     np.testing.assert_array_equal(window.stages["cleaned"], CLEANED)
+
+
+def test_showing_a_second_object_frees_the_first_objects_renderer_first(app, make_window):
+    window, scene_renderer = make_window()
+    extract_object(app, window)
+    window.preview_box.setCurrentText("Object only")
+    first = window.viewport.renderer
+    assert first is not scene_renderer
+    seen = []
+
+    def factory(scene):
+        seen.append(window.viewport.renderer)  # what still holds GPU memory while the next copy is built
+        return FakeRenderer(n=len(scene))
+
+    window.renderer_factory = factory
+    window.update_preview()
+    assert seen == [scene_renderer]
