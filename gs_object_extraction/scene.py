@@ -14,8 +14,8 @@ SH_C0 = 0.28209479177387814
 SUPPORTED_SH_COUNTS = (1, 4, 9, 16)
 
 
-def _finite_array(value, name: str) -> np.ndarray:
-    array = np.array(value, dtype=np.float64, copy=True)
+def _finite_array(value, name: str, copy: bool = True) -> np.ndarray:
+    array = np.array(value, dtype=np.float64, copy=True) if copy else np.asarray(value, dtype=np.float64)
     if not np.all(np.isfinite(array)):
         raise ValueError(f"{name} must contain only finite values")
     return array
@@ -27,6 +27,8 @@ class GaussianScene:
 
     Construction copies input arrays. IDs must be unique integers; subsets and
     copies retain them. Empty scenes are valid, for example after a selection.
+    ``_adopt`` is the same validation without the copy, for arrays this package
+    has just allocated and nothing else refers to.
     """
 
     means: np.ndarray
@@ -38,14 +40,29 @@ class GaussianScene:
     extras: Mapping[str, np.ndarray] = field(default_factory=dict)
 
     def __post_init__(self):
-        self.means = _finite_array(self.means, "means")
+        self._validate(copy=True)
+
+    @classmethod
+    def _adopt(cls, means, scales, quaternions, opacities, sh, ids, extras) -> "GaussianScene":
+        """Take ownership of freshly allocated arrays: validated like a constructed scene, not copied again.
+
+        The caller must not keep another reference to them or hand in a view of memory it still uses.
+        """
+        scene = object.__new__(cls)
+        scene.means, scene.scales, scene.quaternions = means, scales, quaternions
+        scene.opacities, scene.sh, scene.ids, scene.extras = opacities, sh, ids, extras
+        scene._validate(copy=False)
+        return scene
+
+    def _validate(self, copy):
+        self.means = _finite_array(self.means, "means", copy)
         if self.means.ndim != 2 or self.means.shape[1] != 3:
             raise ValueError("means must have shape (N, 3)")
         n = len(self.means)
-        self.scales = _finite_array(self.scales, "scales")
-        self.quaternions = _finite_array(self.quaternions, "quaternions")
-        self.opacities = _finite_array(self.opacities, "opacities")
-        self.sh = _finite_array(self.sh, "sh")
+        self.scales = _finite_array(self.scales, "scales", copy)
+        self.quaternions = _finite_array(self.quaternions, "quaternions", copy)
+        self.opacities = _finite_array(self.opacities, "opacities", copy)
+        self.sh = _finite_array(self.sh, "sh", copy)
         for name, shape in (("scales", (n, 3)), ("quaternions", (n, 4)),
                             ("opacities", (n,))):
             if getattr(self, name).shape != shape:
@@ -69,7 +86,7 @@ class GaussianScene:
                 raise ValueError("ids must be an integer array of shape (N,)")
             if ids.dtype.kind == "u" and np.any(ids > np.iinfo(np.int64).max):
                 raise ValueError("ids must fit signed 64-bit integers")
-            self.ids = np.array(ids, dtype=np.int64, copy=True)
+            self.ids = np.array(ids, dtype=np.int64, copy=True) if copy else np.asarray(ids, dtype=np.int64)
         ordered = np.sort(self.ids)
         if n and np.any(ordered[1:] == ordered[:-1]):
             raise ValueError("ids must be unique")
@@ -78,7 +95,7 @@ class GaussianScene:
             if (not isinstance(name, str) or not name or not name.isascii()
                     or any(c.isspace() or ord(c) < 33 or ord(c) == 127 for c in name)):
                 raise ValueError("extra attribute names must be nonempty printable ASCII tokens")
-            array = np.array(values, copy=True)
+            array = np.array(values, copy=True) if copy else np.asarray(values)
             if array.shape != (n,) or array.dtype.kind not in "biuf":
                 raise ValueError(f"extra attribute {name!r} must be a numeric scalar array of shape (N,)")
             if not np.all(np.isfinite(array)):
@@ -100,10 +117,11 @@ class GaussianScene:
             raise ValueError("subset requires a one-dimensional boolean mask or integer indices")
         if index.dtype.kind == "b" and len(index) != len(self):
             raise ValueError("boolean subset mask must have length N")
-        return GaussianScene(self.means[index], self.scales[index],
-                             self.quaternions[index], self.opacities[index],
-                             self.sh[index], self.ids[index],
-                             {key: value[index] for key, value in self.extras.items()})
+        # Indexing with a mask or an index array already copies, so the subset owns its arrays.
+        return GaussianScene._adopt(self.means[index], self.scales[index],
+                                    self.quaternions[index], self.opacities[index],
+                                    self.sh[index], self.ids[index],
+                                    {key: value[index] for key, value in self.extras.items()})
 
     @property
     def covariances(self) -> np.ndarray:

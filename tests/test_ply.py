@@ -256,3 +256,20 @@ def test_saving_a_loaded_scene_is_reproducible_across_processes(tmp_path):
                                 text=True, check=True, env={**os.environ, "PYTHONHASHSEED": seed})
         digests.add(result.stdout.strip())
     assert len(digests) == 1, f"the written file varies with the hash seed: {digests}"
+
+
+def test_the_constructor_still_copies_while_subsets_and_loads_are_validated_and_independent(tmp_path):
+    source = make_scene()
+    rebuilt = GaussianScene(source.means, source.scales, source.quaternions, source.opacities, source.sh)
+    assert not np.shares_memory(rebuilt.means, source.means)  # only package-built arrays skip the copy
+    with pytest.raises(ValueError, match="unique"):
+        source.subset(np.array([1, 1]))  # the shortcut still validates
+    path = tmp_path / "scene.ply"
+    save_ply(source, path)
+    loaded = load_ply(path)
+    arrays = [loaded.means, loaded.scales, loaded.quaternions, loaded.opacities, loaded.sh, loaded.ids,
+              *loaded.extras.values()]
+    for i, first in enumerate(arrays):
+        for second in arrays[i + 1:]:
+            assert not np.shares_memory(first, second)  # no two attributes are views of one buffer
+    assert all(values.flags.owndata for values in loaded.extras.values())  # extras are not views of the records

@@ -195,7 +195,7 @@ def load_ply(path) -> GaussianScene:
         ids = values.astype(np.int64)
     # Declared order, not set order: it keeps the file's columns and makes saving reproducible.
     extras = {name: vertices[name].copy() for name, _ in properties if name not in reserved}
-    return GaussianScene(means, scales, quaternions, opacities, sh, ids, extras)
+    return GaussianScene._adopt(means, scales, quaternions, opacities, sh, ids, extras)  # all freshly built above
 
 
 def _storage_type(array):
