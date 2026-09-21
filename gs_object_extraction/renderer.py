@@ -186,5 +186,5 @@ class GsplatRenderer(Exclusive):
         # Reject numerical failures; permit tiny signed rounding only.
         if not np.isfinite(values).all() or values.min(initial=0) < -1e-5:
             raise RuntimeError("lifting produced invalid contribution sums")
-        values = np.maximum(values, 0)
+        np.maximum(values, 0, out=values)  # a fresh float64 copy, so clip it where it is
         return Lifted(values[:, 0], values[:, 1], values[:, 2])
