@@ -141,6 +141,7 @@ class AutoMarkJob(QThread):
     def run(self):
         try:
             marked, skipped = [], 0
+            run = object()  # keys this run's views apart from every earlier run's
             selection = select(lift_masks(self.renderer, self.views))
             if not selection.any():
                 raise ValueError("The marked views do not select any Gaussian yet. Mark the object more closely first.")
@@ -167,7 +168,7 @@ class AutoMarkJob(QThread):
                 else:
                     points = prompt_points(silhouette)
                     masks, _ = self.segmenter.candidates(self.renderer.render_image(camera, background=BACKGROUND),
-                                                         ("auto", index), points, [1] * len(points), several=True)
+                                                         (run, index), points, [1] * len(points), several=True)
                     mask, sits_on = best_candidate(masks, silhouette)
                     if usable(mask, sits_on):
                         marked.append(MaskedView(camera, mask, tuple(points), (1,) * len(points)))
