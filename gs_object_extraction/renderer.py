@@ -105,6 +105,9 @@ class GsplatRenderer(Exclusive):
         self.opacities = self._tensor(scene.opacities)
         self.sh = self._tensor(scene.sh)
         self.degree = int(np.sqrt(scene.sh.shape[1]))-1
+        # A reusable pinned staging buffer for lift(): downloading into fresh pageable memory
+        # every call measurably cost more than the extra host copy this replaces it with.
+        self._lifted = self.torch.empty((self.n, 3), dtype=self.torch.float32, pin_memory=True)
 
     def _tensor(self, values):
         return self.torch.as_tensor(np.asarray(values).copy(), dtype=self.torch.float32, device="cuda").contiguous()
@@ -182,9 +185,16 @@ class GsplatRenderer(Exclusive):
             image, _ = self._rasterize(camera, features=features, active=active)
             weights = self._tensor(np.stack((labels == 1, labels == 0, np.ones_like(labels)), axis=-1))
             accumulated, = torch.autograd.grad(image, features, grad_outputs=weights)
-        values = accumulated.detach().cpu().numpy().astype(np.float64)
+            # A pinned buffer transfers over PCIe noticeably faster than a fresh pageable one each
+            # call. It is reused by the next call, so read it into an array of its own before the
+            # lock releases: nothing else may start overwriting it until this does. Stays float32,
+            # as the GPU produced it: widening every view to float64 here, only for Lifted's +=
+            # to widen it again on accumulation, cost about a fifth of extraction's time on its own.
+            self._lifted.copy_(accumulated.detach(), non_blocking=True)
+            torch.cuda.synchronize()
+            values = self._lifted.numpy().copy()
         # Reject numerical failures; permit tiny signed rounding only.
         if not np.isfinite(values).all() or values.min(initial=0) < -1e-5:
             raise RuntimeError("lifting produced invalid contribution sums")
-        np.maximum(values, 0, out=values)  # a fresh float64 copy, so clip it where it is
+        np.maximum(values, 0, out=values)  # a fresh copy off the GPU, so clip it where it is
         return Lifted(values[:, 0], values[:, 1], values[:, 2])

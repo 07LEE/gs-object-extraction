@@ -78,3 +78,73 @@ def test_lift_with_active_renders_the_selection_on_its_own():
     assert lifted.total[0] == 0 and lifted.inside[1] > renderer.lift(camera, labels).inside[1]
     everyone = renderer.lift(camera, labels, active=np.ones(3, bool))
     np.testing.assert_allclose(everyone.inside, renderer.lift(camera, labels).inside, rtol=1e-6, atol=1e-7)
+
+
+@cuda
+def test_lift_stays_float32_but_accumulates_into_lifted_zeros_as_float64():
+    """lift() itself is float32, straight off the GPU; summing views is where it widens."""
+    renderer, camera = three_gaussians()
+    labels = np.full((24, 24), -1, dtype=np.int8)
+    labels[8:14, 8:14] = 1
+    lifted = renderer.lift(camera, labels)
+    assert lifted.inside.dtype == np.float32
+    from gs_object_extraction.renderer import Lifted
+    accumulated = Lifted.zeros(3)
+    accumulated += lifted
+    accumulated += lifted
+    assert accumulated.inside.dtype == np.float64
+    np.testing.assert_allclose(accumulated.inside, 2 * lifted.inside.astype(np.float64), rtol=1e-6, atol=1e-7)
+
+
+def test_extract_select_and_off_share_tolerate_float32_lifted_arrays():
+    """select() and off_share() run on whatever Lifted.zeros() accumulated into, float32 or float64."""
+    from gs_object_extraction.extract import off_share, select
+    from gs_object_extraction.renderer import Lifted
+    inside32 = np.array([.7, .6, .04, 0.], dtype=np.float32)
+    outside32 = np.array([.3, .4, 0., 0.], dtype=np.float32)
+    lifted32 = Lifted(inside32, outside32, np.zeros(4, dtype=np.float32))
+    lifted64 = Lifted(inside32.astype(np.float64), outside32.astype(np.float64), np.zeros(4))
+    np.testing.assert_array_equal(select(lifted32), select(lifted64))
+    np.testing.assert_allclose(off_share(inside32, outside32), off_share(inside32.astype(np.float64), outside32.astype(np.float64)),
+                               rtol=1e-6, atol=1e-7)
+
+
+@cuda
+def test_concurrent_lifts_do_not_corrupt_each_others_pinned_buffer():
+    """Two threads hammering lift() must each see only their own call's values, never a torn read.
+
+    Needs enough Gaussians that a call takes long enough to actually overlap another thread's;
+    with only a few, both threads finish inside the GIL's own scheduling slice and never race.
+    """
+    import threading
+    from gs_object_extraction.camera import Camera
+    from gs_object_extraction.renderer import GsplatRenderer
+    rng = np.random.default_rng(0)
+    n = 30000
+    means = rng.normal(scale=1., size=(n, 3))
+    means[:, 2] += 5
+    scene = GaussianScene.from_colors(means, np.full((n, 3), .05), rng.random((n, 3)), np.full(n, .9))
+    renderer = GsplatRenderer(scene)
+    camera = Camera.look_at((0, 0, 0), (0, 0, 5), width=64, height=64)
+    labels_a = np.full((64, 64), -1, dtype=np.int8)
+    labels_a[10:30, 10:30] = 1
+    labels_b = np.full((64, 64), -1, dtype=np.int8)
+    labels_b[34:54, 34:54] = 1
+    reference_a, reference_b = renderer.lift(camera, labels_a), renderer.lift(camera, labels_b)
+    # gsplat's backward accumulates with atomics, so even repeated single-threaded calls on the
+    # same inputs differ at this order; a torn read off another thread's labels is far larger.
+    mismatches = []
+
+    def hammer(labels, reference):
+        for _ in range(40):
+            lifted = renderer.lift(camera, labels)
+            if not np.allclose(lifted.inside, reference.inside, rtol=1e-3, atol=1e-5):
+                mismatches.append(lifted.inside)
+
+    threads = [threading.Thread(target=hammer, args=(labels_a, reference_a)),
+              threading.Thread(target=hammer, args=(labels_b, reference_b))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(60)
+    assert not mismatches
