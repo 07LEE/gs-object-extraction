@@ -142,3 +142,37 @@ def test_extract_reports_how_far_each_gaussian_reaches_past_the_masks():
     np.testing.assert_array_equal(stages["cleaned"], [True, True, False])  # a third off-mask is within the limit
     np.testing.assert_array_equal(trim_scales(off) < 1, [False, True, False])
     np.testing.assert_array_equal(extract(renderer, views, rounds=0)["off"], np.zeros(renderer.n))
+
+
+def test_lift_masks_uses_a_renderers_lift_batch_when_it_has_one():
+    """lift_masks defers to lift_batch when a renderer offers one, instead of summing lift() itself."""
+    from gs_object_extraction.extract import lift_masks
+
+    class BatchingRenderer(FakeRenderer):
+        def __init__(self):
+            self.batch_calls, self.view_calls = [], 0
+
+        def lift(self, *args, **kwargs):
+            raise AssertionError("lift_masks should not fall back to lift() when lift_batch exists")
+
+        def lift_batch(self, views, *, band=0, active=None, on_view=None):
+            self.batch_calls.append((len(views), band, active))
+            w = self.weights(active)
+            total_inside = total_outside = total_all = np.zeros(self.n)
+            for camera, mask in views:
+                labels = band_labels(mask, band)[0]
+                total_inside = total_inside + w[:, labels == 1].sum(1)
+                total_outside = total_outside + w[:, labels == 0].sum(1)
+                total_all = total_all + w.sum(1)
+                self.view_calls += 1
+                if on_view is not None:
+                    on_view()
+            return Lifted(total_inside, total_outside, total_all)
+
+    renderer = BatchingRenderer()
+    views = [(None, MASK), (None, MASK)]
+    seen = []
+    lifted = lift_masks(renderer, views, band=1, on_view=lambda: seen.append(1))
+    assert renderer.batch_calls == [(2, 1, None)]  # one call for the whole round, not one per view
+    assert renderer.view_calls == 2 and seen == [1, 1]  # on_view still fires once per view
+    assert lifted.inside.shape == (renderer.n,)

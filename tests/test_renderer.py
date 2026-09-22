@@ -148,3 +148,57 @@ def test_concurrent_lifts_do_not_corrupt_each_others_pinned_buffer():
     for t in threads:
         t.join(60)
     assert not mismatches
+
+
+@cuda
+def test_lift_batch_matches_summing_individual_lifts():
+    renderer, camera = three_gaussians()
+    masks = [np.zeros((24, 24), bool), np.zeros((24, 24), bool)]
+    masks[0][8:14, 8:14] = True
+    masks[1][14:19, 10:17] = True
+    views = [(camera, m) for m in masks]
+    from gs_object_extraction.masks import band_labels
+    from gs_object_extraction.renderer import Lifted
+    reference = Lifted.zeros(3)
+    for m in masks:
+        reference += renderer.lift(camera, band_labels(m, 0))
+    batched = renderer.lift_batch(views)
+    np.testing.assert_allclose(batched.inside, reference.inside, rtol=1e-4, atol=1e-6)
+    np.testing.assert_allclose(batched.outside, reference.outside, rtol=1e-4, atol=1e-6)
+    calls = []
+    renderer.lift_batch(views, on_view=lambda: calls.append(1))
+    assert calls == [1, 1]  # once per view, not once per round
+
+
+
+@cuda
+def test_lift_batch_still_rejects_one_bad_view_even_though_the_round_sums():
+    """A single bad view must fail lift_batch, not get averaged away by the rest of the round.
+
+    If lift_batch only checked the final sum, a large positive first view could hide a
+    corrupt negative second view. Poisoning only the second view's gradient in place, with
+    a first view large enough to swamp it in the total, tells the two cases apart.
+    """
+    import torch
+    renderer, camera = three_gaussians()
+    good = np.ones((24, 24), bool)  # every pixel: the largest inside contribution three Gaussians can give
+    small = np.zeros((24, 24), bool)
+    small[8:9, 8:9] = True
+    views = [(camera, good), (camera, small)]
+    real_grad = torch.autograd.grad
+    calls = []
+
+    def poisoning_grad(*args, **kwargs):
+        out = real_grad(*args, **kwargs)
+        calls.append(1)
+        if len(calls) == 2:  # the second view: corrupt its own gradient before lift_batch checks it
+            grad = out[0].clone()
+            grad[0, 0] = -1.
+            out = (grad,)
+        return out
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(torch.autograd, "grad", poisoning_grad)
+        with pytest.raises(RuntimeError, match="invalid"):
+            renderer.lift_batch(views)
+    assert len(calls) == 2  # the failure was caught right after the second view, not the first

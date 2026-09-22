@@ -198,3 +198,34 @@ class GsplatRenderer(Exclusive):
             raise RuntimeError("lifting produced invalid contribution sums")
         np.maximum(values, 0, out=values)  # a fresh copy off the GPU, so clip it where it is
         return Lifted(values[:, 0], values[:, 1], values[:, 2])
+
+    def lift_batch(self, views, *, band=0, active=None, on_view=None):
+        """Sum a round's views on the GPU and download once, instead of once per view.
+
+        ``lift_masks`` uses this when a renderer offers it; the summed result matches
+        calling ``lift`` per view and adding the results, within float32's rounding.
+        """
+        from .masks import band_labels
+        torch = self.torch
+        accumulator = torch.zeros((self.n, 3), dtype=torch.float32, device="cuda")
+        with self._lock:
+            for camera, mask in views:
+                labels = validate_labels(band_labels(mask, band), (camera.height, camera.width))
+                features = torch.zeros_like(self.means, requires_grad=True)
+                with torch.enable_grad():
+                    image, _ = self._rasterize(camera, features=features, active=active)
+                    weights = self._tensor(np.stack((labels == 1, labels == 0, np.ones_like(labels)), axis=-1))
+                    grad, = torch.autograd.grad(image, features, grad_outputs=weights)
+                grad = grad.detach()
+                # A scalar sync per view, not a full N x 3 download, so one bad view still
+                # fails here instead of being averaged away by the rest of the round's sum.
+                if not bool(torch.isfinite(grad).all()) or float(grad.min()) < -1e-5:
+                    raise RuntimeError("lifting produced invalid contribution sums")
+                accumulator += grad
+                if on_view is not None:
+                    on_view()
+            self._lifted.copy_(accumulator, non_blocking=True)
+            torch.cuda.synchronize()
+            values = self._lifted.numpy().copy()
+        np.maximum(values, 0, out=values)
+        return Lifted(values[:, 0], values[:, 1], values[:, 2])

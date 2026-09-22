@@ -17,7 +17,17 @@ EDGE, TRIM = .05, .7  # a Gaussian reaching this far past the masks is shrunk by
 
 
 def lift_masks(renderer, views, *, band=0, active=None, on_view=None):
-    """Contributions summed over views, calling ``on_view()`` after each lift."""
+    """Contributions summed over views, calling ``on_view()`` after each lift.
+
+    Uses ``renderer.lift_batch`` when it offers one: a real renderer sums a round's
+    views on the GPU and downloads once, instead of every view paying its own trip.
+    Falls back to calling ``lift`` per view and adding the results here, which is
+    what every renderer without a ``lift_batch`` (including every fake one in tests)
+    still does.
+    """
+    batch = getattr(renderer, "lift_batch", None)
+    if batch is not None:
+        return batch(views, band=band, active=active, on_view=on_view)
     lifted = Lifted.zeros(renderer.n)
     for camera, mask in views:
         lifted += renderer.lift(camera, band_labels(mask, band), active=active)
