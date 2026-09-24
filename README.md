@@ -68,6 +68,4 @@ Surfaces missing from the source scene cannot be recovered. An object photograph
 
 ## License
 
-Licensing terms can be found in the [License File](LICENSE).
-
-Third-party dependencies are distributed under their own licenses.
+[Apache-2.0](LICENSE). [Third-party licenses](third_party/README.md).
