@@ -11,7 +11,7 @@ Extract an object from a trained 3D Gaussian Splatting scene and export it as a 
 
 ## Installation
 
-From the repository root, install PyTorch for your CUDA version (the index URL below is for CUDA 12.8), then the tool and the SAM2 checkpoint:
+From the repository root, install PyTorch for your CUDA version (the index URL below is for CUDA 12.8), then the tool:
 
 ```bash
 python3 -m venv .venv-gpu
@@ -20,9 +20,9 @@ pip install --upgrade pip setuptools wheel
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
 SAM2_BUILD_CUDA=0 pip install --no-build-isolation -r requirements.txt
 pip install --no-deps -e .
-mkdir -p checkpoints
-curl -L -o checkpoints/sam2.1_hiera_base_plus.pt https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_base_plus.pt
 ```
+
+The SAM2 checkpoint (about 300 MB) downloads on first use into `~/.cache/gs-object-extraction/checkpoints/`. A copy already in the repository's `checkpoints/` folder is used instead.
 
 gsplat compiles its CUDA kernels the first time a scene is opened, which takes a minute or two.
 

@@ -60,6 +60,7 @@ class SegmenterLoadJob(QThread):
     """
 
     failed = Signal(str)
+    progress = Signal(str)
 
     def __init__(self, segmenter, parent=None):
         super().__init__(parent)
@@ -67,6 +68,7 @@ class SegmenterLoadJob(QThread):
 
     def run(self):
         try:
+            self.segmenter.progress = self.progress.emit
             self.segmenter.warm()
         except Exception as exc:
             self.failed.emit(str(exc))

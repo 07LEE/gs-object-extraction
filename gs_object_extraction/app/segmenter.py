@@ -5,12 +5,28 @@ The model loads on first use. The image embedding is computed once per view
 """
 
 import contextlib
+import os
 from pathlib import Path
 import re
 import threading
+import urllib.request
 import numpy as np
 
-DEFAULT_CHECKPOINT = Path(__file__).resolve().parents[2] / "checkpoints" / "sam2.1_hiera_base_plus.pt"
+CHECKPOINT_NAME = "sam2.1_hiera_base_plus.pt"
+_URLS = {"sam2.1": "https://dl.fbaipublicfiles.com/segment_anything_2/092824/",
+         "sam2": "https://dl.fbaipublicfiles.com/segment_anything_2/072824/"}
+
+
+def default_checkpoint():
+    """A checkpoint kept next to a source checkout if there is one, else the per-user cache."""
+    beside = Path(__file__).resolve().parents[2] / "checkpoints" / CHECKPOINT_NAME
+    if beside.exists():
+        return beside
+    cache = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
+    return cache / "gs-object-extraction" / "checkpoints" / CHECKPOINT_NAME
+
+
+DEFAULT_CHECKPOINT = default_checkpoint()
 _SIZES = {"tiny": "t", "small": "s", "base_plus": "b+", "large": "l"}
 WARMUP_SIZE = 64  # SAM2 resizes every view to its own input size, so a small one warms the same kernels
 _WARMUP_VIEW = object()  # a view key of its own, so the warmup embeds instead of reusing a cached view
@@ -26,7 +42,31 @@ def config_for(checkpoint):
     return f"configs/{family}/{family}_hiera_{_SIZES[size]}.yaml"
 
 
+def download_checkpoint(checkpoint, progress=None):
+    """Fetch a released checkpoint to ``checkpoint``; the file appears only once it is complete."""
+    checkpoint = Path(checkpoint)
+    config_for(checkpoint)  # a name we cannot tell is not one we can fetch either
+    url = _URLS["sam2.1" if checkpoint.name.startswith("sam2.1") else "sam2"] + checkpoint.name
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    partial = checkpoint.with_name(checkpoint.name + ".part")
+    try:
+        with urllib.request.urlopen(url, timeout=30) as response, open(partial, "wb") as out:
+            total = int(response.headers.get("Content-Length") or 0)
+            done = 0
+            while chunk := response.read(1 << 20):
+                out.write(chunk)
+                done += len(chunk)
+                if progress and total:
+                    progress(f"Downloading SAM2 checkpoint... {done * 100 // total}%")
+        partial.replace(checkpoint)
+    except BaseException:
+        partial.unlink(missing_ok=True)
+        raise
+
+
 class Segmenter:
+    progress = None  # called with a status line while a checkpoint downloads
+
     def __init__(self, checkpoint=DEFAULT_CHECKPOINT, predictor=None):
         self.checkpoint = Path(checkpoint)
         self._predictor = predictor
@@ -44,7 +84,13 @@ class Segmenter:
         with self._lock:
             if self._predictor is None:
                 if not self.checkpoint.exists():
-                    raise FileNotFoundError(f"SAM2 checkpoint not found: {self.checkpoint} (run scripts/setup_env.sh)")
+                    try:
+                        download_checkpoint(self.checkpoint, self.progress)
+                    except Exception as exc:
+                        raise FileNotFoundError(f"SAM2 checkpoint {self.checkpoint} is missing and could not be "
+                                                f"downloaded ({exc})") from exc
+                    if self.progress:
+                        self.progress("Loading SAM2...")
                 from sam2.build_sam import build_sam2
                 from sam2.sam2_image_predictor import SAM2ImagePredictor
                 self._predictor = SAM2ImagePredictor(build_sam2(config_for(self.checkpoint), str(self.checkpoint), device="cuda"))

@@ -106,9 +106,9 @@ def test_bad_prompts_are_rejected(points, labels):
         Segmenter(predictor=FakePredictor()).predict(np.zeros((4, 5, 3), np.uint8), 1, points, labels)
 
 
-def test_missing_checkpoint_says_how_to_get_it(tmp_path):
+def test_missing_checkpoint_that_cannot_be_fetched_says_so(tmp_path):
     seg = Segmenter(tmp_path / "missing.pt")
-    with pytest.raises(FileNotFoundError, match="setup_env.sh"):
+    with pytest.raises(FileNotFoundError, match="could not be downloaded"):
         seg.predict(np.zeros((4, 5, 3), np.uint8), 1, [(1, 1)], [1])
     assert not seg.loaded
 
@@ -176,3 +176,34 @@ def test_unknown_checkpoint_name_is_refused():
     from gs_object_extraction.app.segmenter import config_for
     with pytest.raises(ValueError, match="base_plus"):
         config_for("my_weights.pt")
+
+
+def test_a_missing_checkpoint_is_downloaded_then_loaded(tmp_path, monkeypatch):
+    import io
+    from gs_object_extraction.app import segmenter as module
+
+    class Response(io.BytesIO):
+        headers = {"Content-Length": "6"}
+        def __enter__(self): return self
+        def __exit__(self, *exc): self.close()
+
+    urls, lines = [], []
+    monkeypatch.setattr(module.urllib.request, "urlopen", lambda url, timeout: urls.append(url) or Response(b"weights"[:6]))
+    target = tmp_path / "cache" / "sam2.1_hiera_base_plus.pt"
+    module.download_checkpoint(target, lines.append)
+    assert target.read_bytes() == b"weight" and not target.with_name(target.name + ".part").exists()
+    assert urls == ["https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_base_plus.pt"]
+    assert lines[-1].endswith("100%")
+
+
+def test_a_failed_download_leaves_no_file_and_says_why(tmp_path, monkeypatch):
+    from gs_object_extraction.app import segmenter as module
+
+    def offline(url, timeout):
+        raise OSError("no network")
+
+    monkeypatch.setattr(module.urllib.request, "urlopen", offline)
+    seg = Segmenter(tmp_path / "sam2.1_hiera_tiny.pt")
+    with pytest.raises(FileNotFoundError, match="no network"):
+        seg.load()
+    assert list(tmp_path.iterdir()) == []

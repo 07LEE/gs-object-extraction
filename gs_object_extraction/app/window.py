@@ -323,6 +323,7 @@ class MainWindow(QMainWindow):
         job = SegmenterLoadJob(segmenter, self)
         self.model_job = job
         job.failed.connect(lambda message: self.statusBar().showMessage(f"SAM2 did not load: {message}"))
+        job.progress.connect(self.statusBar().showMessage)
         job.finished.connect(self.segmenter_load_finished)
         self.statusBar().showMessage("Loading SAM2...")
         job.start()
