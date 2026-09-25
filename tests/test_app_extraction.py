@@ -849,22 +849,28 @@ def test_the_x_key_deletes_the_selection_and_does_nothing_without_one(app, make_
     np.testing.assert_array_equal(window.stages["cleaned"], [False, True, False, False, False])
 
 
-def test_the_box_round_the_object_follows_what_is_left_and_can_be_hidden(app, make_window):
+def test_the_box_round_the_object_follows_what_is_left_and_the_cube_over_the_view_hides_it(app, make_window):
     window, _ = make_window()
-    assert not window.box_check.isEnabled() and window.viewport.box is None
+    view = window.viewport
+    assert view.box_button.isVisible() and not view.box_button.isEnabled() and view.box is None  # greyed until there is a box
     show_object(app, window)
-    assert window.viewport.box.shape == (8, 3) and window.box_check.isEnabled() and window.box_check.isChecked()
-    both = window.viewport.box.copy()
+    assert view.box.shape == (8, 3) and view.box_button.isEnabled() and view.box_button.isChecked()
+    both = view.box.copy()
     means = window.object_scene.means
-    assert "×" in window.box_check.text()
+    assert "×" in view.box_label.text() and view.box_label.isVisible()
     assert (both.min(axis=0) <= means.min(axis=0) + 1e-9).all() and (both.max(axis=0) >= means.max(axis=0) - 1e-9).all()
+    assert view.box_button.x() + view.box_button.width() <= view.width()  # the cube sits inside the view, in its corner
+    assert view.box_label.x() + view.box_label.width() < view.box_button.x()
     window.pick_region(*box_around(window, 0), 0)
     window.delete_selection()
-    assert not np.allclose(window.viewport.box, both)  # one Gaussian is left, the box shrinks to it
-    window.box_check.setChecked(False)
-    assert not window.viewport.show_box
+    assert not np.allclose(view.box, both)  # one Gaussian is left, the box shrinks to it
+    view.box_button.click()
+    assert not view.show_box and not view.box_label.isVisible() and view.box_button.isVisible()
+    view.box_button.click()  # on again
     window.preview_box.setCurrentText("Scene")
-    assert window.viewport.box is None and not window.box_check.isEnabled() and window.box_check.text() == "Bounding box"
+    assert view.box is not None and view.box_button.isEnabled() and view.box_label.isVisible()  # the scene gets the box too
+    window.invalidate_result()
+    assert view.box is None and view.box_button.isVisible() and not view.box_button.isEnabled() and not view.box_label.isVisible()
 
 
 def fake_refine(renderer, targets, *, steps=None, on_step=None):
@@ -965,3 +971,30 @@ def test_a_refit_can_be_cancelled_and_blocks_editing_meanwhile(app, make_window,
     wait_until(app, lambda: window.refine_job is None)
     assert window._refined is None and not window.revert_button.isEnabled()
     assert window.refine_button.isEnabled()
+
+
+def test_the_object_and_background_toggles_sit_over_the_view_and_drive_the_preview(app, make_window):
+    window, _ = make_window()
+    view = window.viewport
+    assert view.object_button.isVisible() and not view.object_button.isEnabled()  # a scene is open, nothing extracted yet
+    assert view.background_button.isVisible() and view.box_button.isVisible()  # all three are always in place
+    assert not view.background_button.isEnabled() and not view.box_button.isEnabled()
+    extract_object(app, window)
+    assert view.object_button.isEnabled() and view.object_button.isChecked()  # the object on its own is showing
+    assert window.preview_box.currentText() == "Object only" and view.background_button.isEnabled() and view.box_button.isEnabled()
+    view.object_button.click()  # back to the scene
+    assert window.preview_box.currentText() == "Scene" and view.active is None
+    assert view.background_button.isVisible() and view.box_button.isVisible() and view.object_button.isVisible()
+    assert not view.background_button.isEnabled() and view.box_button.isEnabled()  # the scene has no background to set, but the box shows
+    positions = [b.pos() for b in (view.object_button, view.background_button, view.box_button)]
+    view.object_button.click()
+    assert view.active is not None and view.background_button.isEnabled() and view.box_button.isEnabled()
+    assert positions == [b.pos() for b in (view.object_button, view.background_button, view.box_button)]  # they did not move
+    assert window.background_box.currentText() == "White"
+    view.background_button.click()
+    assert window.background_box.currentText() == "Black" and view.background == (0., 0., 0.)
+    assert "black" in view.background_button.toolTip().lower().split("(")[0]
+    xs = [b.x() for b in (view.object_button, view.background_button, view.box_button)]
+    assert xs == sorted(xs) and view.box_button.x() + view.box_button.width() <= view.width()  # in a row, inside the view
+    assert view.box_label.x() + view.box_label.width() < view.object_button.x()
+    assert not any(hasattr(window, name) for name in ("box_check",))

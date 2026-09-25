@@ -10,8 +10,8 @@ drops points that were not confirmed.
 import time
 import numpy as np
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QImage, QPainter, QPen
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPen, QPixmap
+from PySide6.QtWidgets import QApplication, QLabel, QToolButton, QWidget
 from .orbit import unproject
 from .pick import EDGES, project
 
@@ -21,6 +21,10 @@ CLICK_SLOP = 4  # pixels a press may move and still count as a click
 PICK_RADIUS = 12  # pixels around a click in the object preview that are selected with it
 HIGHLIGHT_RGBA = (255, 40, 40, 255)
 BOX_COLOR = QColor(255, 190, 0)
+OVERLAY_MARGIN = 10  # pixels between the corner of the view and the controls drawn over it
+OVERLAY_STYLE = ("QToolButton, QLabel { background: rgba(0, 0, 0, 120); color: white; border-radius: 4px; padding: 4px; }"
+                 "QToolButton:checked { background: rgba(230, 150, 0, 210); }"
+                 "QToolButton:disabled { background: rgba(0, 0, 0, 50); }")
 BUSY_RETRY_MS = 16  # wait this long before asking again for a renderer a background job is using
 MASK_RGBA = (255, 140, 0, 110)
 OUTLINE_RGBA = (255, 255, 255, 230)
@@ -47,6 +51,43 @@ def _mask_image(mask):
     return QImage(rgba.data, mask.shape[1], mask.shape[0], 4 * mask.shape[1], QImage.Format_RGBA8888).copy()
 
 
+def _icon(draw, size=22):
+    """An icon drawn in white (or as ``draw`` chooses) rather than loaded, so there is no file to ship."""
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+    painter.setPen(QPen(QColor(255, 255, 255), 1.6))
+    draw(painter, size)
+    painter.end()
+    return QIcon(pixmap)
+
+
+def _draw_cube(painter, size):
+    a, b, c = size * .12, size * .38, size * .88  # the back square is up and to the right of the front one
+    front = [QPointF(a, b), QPointF(c - (b - a), b), QPointF(c - (b - a), c), QPointF(a, c)]
+    back = [QPointF(p.x() + (b - a), p.y() - (b - a)) for p in front]
+    for square in (front, back):
+        painter.drawPolygon(square)
+    for near, far in zip(front, back):
+        painter.drawLine(near, far)
+
+
+def _draw_object_only(painter, size):
+    """A dashed frame for the scene with the object solid inside it."""
+    painter.setPen(QPen(QColor(255, 255, 255, 170), 1.3, Qt.DashLine))
+    painter.drawRoundedRect(QRectF(size * .08, size * .08, size * .84, size * .84), 3, 3)
+    painter.setPen(Qt.NoPen)
+    painter.setBrush(QColor(255, 255, 255))
+    painter.drawRoundedRect(QRectF(size * .32, size * .32, size * .36, size * .36), 2, 2)
+
+
+def _draw_background(painter, size, black):
+    painter.setPen(QPen(QColor(255, 255, 255) if black else QColor(70, 70, 70), 1.6))
+    painter.setBrush(QColor(0, 0, 0) if black else QColor(255, 255, 255))
+    painter.drawEllipse(QRectF(size * .18, size * .18, size * .64, size * .64))
+
+
 class Viewport(QWidget):
     rendered = Signal(float)  # milliseconds spent on the last frame
     render_failed = Signal(str)
@@ -69,6 +110,18 @@ class Viewport(QWidget):
         self._highlight_image = None  # (frame, image) of those dots on the frame on screen
         self.box = None  # corners of the box round the object shown on its own
         self.show_box = True
+        # Drawn over the view, top right: the object on its own or the scene, the background it stands on, the box round it and its size
+        self.object_button = self._overlay_button(_icon(_draw_object_only), "Show the object on its own. Off: the whole scene")
+        self.background_button = self._overlay_button(_icon(lambda p, s: _draw_background(p, s, False)), "")
+        self.background_button.toggled.connect(self._show_background)
+        self._show_background(False)
+        self.box_button = self._overlay_button(_icon(_draw_cube), "Bounding box round the Gaussians that are left, so stray ones "
+                                               "show as extra room. Its size is in the scene's own units")
+        self.box_button.setChecked(True)
+        self.box_button.toggled.connect(self.set_box_visible)
+        self.box_label = QLabel(self)
+        self.box_label.setStyleSheet(OVERLAY_STYLE)
+        self.box_label.hide()
         self._box = None  # (start, current) of the selection box being dragged, in widget pixels
         self.image = None
         self.render_error = None  # message of the last failed render, shown instead of a stale frame
@@ -86,9 +139,34 @@ class Viewport(QWidget):
         self._timer.setInterval(0)
         self._timer.timeout.connect(self.render_now)
 
+    def _overlay_button(self, icon, tip):
+        button = QToolButton(self)
+        button.setIcon(icon)
+        button.setCheckable(True)
+        button.setToolTip(tip)
+        button.setStyleSheet(OVERLAY_STYLE)
+        button.hide()
+        return button
+
+    def _show_background(self, black):
+        self.background_button.setIcon(_icon(lambda p, s: _draw_background(p, s, black)))
+        self.background_button.setToolTip("Background of the object on its own: " + ("black" if black else "white") +
+                                          " (click for " + ("white" if black else "black") + ")")
+
+    def _sync_overlay(self):
+        """The three controls stay where they are once a scene is open; the ones that mean nothing for what is on screen are greyed out."""
+        opened = self.renderer is not None
+        for button in (self.object_button, self.background_button, self.box_button):
+            button.setVisible(opened)
+        self.background_button.setEnabled(self.active is not None)
+        self.box_button.setEnabled(self.box is not None)
+        self.box_label.setVisible(self.box is not None and self.show_box)
+        self._place_overlay()
+
     def set_scene(self, renderer, orbit):
         self.renderer, self.orbit = renderer, orbit
         self.active, self.background = None, BACKGROUND
+        self._sync_overlay()
         self.view_changed()
 
     def clear(self):
@@ -96,6 +174,7 @@ class Viewport(QWidget):
         self.renderer = self.orbit = self.image = self.pixels = self.camera = self.render_error = None
         self.active, self.background = None, BACKGROUND
         self.selecting, self.highlight, self._highlight_image, self._box, self.box = False, None, None, None, None
+        self._sync_overlay()
         self.clear_prompts()
 
     def set_preview(self, active=None, background=BACKGROUND, renderer=None):
@@ -113,8 +192,8 @@ class Viewport(QWidget):
         if (active is not None) != (self.active is not None):  # the scene and the object are marked and selected differently
             self.set_selecting(False)
             self.set_highlight(None)
-            self.set_box(None)
         self.active, self.background = active, background
+        self._sync_overlay()
         self.view_changed()
 
     def set_suspended(self, on):
@@ -288,14 +367,30 @@ class Viewport(QWidget):
         self.setCursor(Qt.CrossCursor if self.selecting else Qt.ArrowCursor)
         self.update()
 
-    def set_box(self, corners):
-        """The box round the object, drawn over the preview as twelve lines; ``None`` for no box."""
+    def set_box(self, corners, size=None):
+        """The box round the extracted object, drawn over the scene or the object alone as twelve lines, and its size; ``None`` for no box."""
         self.box = None if corners is None else np.asarray(corners, dtype=float)
+        self.box_label.setText("" if size is None else " × ".join(f"{v:.2f}" for v in size))
+        self._sync_overlay()
         self.update()
 
     def set_box_visible(self, on):
         self.show_box = bool(on)
+        self.box_label.setVisible(self.box is not None and self.show_box)
         self.update()
+
+    def _place_overlay(self):
+        """Top right corner, from the right: the box, the background, the object or scene, and the box's size."""
+        x = self.width() - OVERLAY_MARGIN
+        top = OVERLAY_MARGIN
+        for button in (self.box_button, self.background_button, self.object_button):
+            button.adjustSize()
+            if button.isVisibleTo(self):
+                x -= button.width()
+                button.move(x, top)
+                x -= 6
+        self.box_label.adjustSize()
+        self.box_label.move(x - self.box_label.width(), top + (self.box_button.height() - self.box_label.height()) // 2)
 
     def set_highlight(self, points):
         """Draw the selected Gaussians as red dots; ``None`` for no selection."""
@@ -331,7 +426,7 @@ class Viewport(QWidget):
             painter.drawText(self.rect(), Qt.AlignCenter | Qt.TextWordWrap, message)
             return
         painter.drawImage(self.rect(), self.image)
-        if self.box is not None and self.show_box and self.camera is not None and self.active is not None:
+        if self.box is not None and self.show_box and self.camera is not None:
             x, y, depth = project(self.camera, self.box)
             scale = self.width() / self.camera.width
             painter.setRenderHint(QPainter.Antialiasing)
@@ -364,6 +459,7 @@ class Viewport(QWidget):
             painter.drawEllipse(QPointF((px + .5) * scale, (py + .5) * scale), 5, 5)
 
     def resizeEvent(self, event):
+        self._place_overlay()
         self.view_changed()
 
     def mousePressEvent(self, event):

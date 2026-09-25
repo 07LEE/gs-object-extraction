@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 from PySide6.QtCore import QSignalBlocker, Qt
 from PySide6.QtGui import QAction, QKeySequence
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QDockWidget, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame,
+from PySide6.QtWidgets import (QComboBox, QDockWidget, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame,
                                QGroupBox, QHBoxLayout, QLabel, QListWidget, QMainWindow, QMessageBox, QProgressBar, QPushButton,
                                QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
 from ..extract import OFF_MASK, TRIM, trim_scales
@@ -17,7 +17,7 @@ from .loading import SceneLoadJob, SegmenterLoadJob
 from .orbit import AXES, DEFAULT_UP, Orbit
 from .segmenter import DEFAULT_CHECKPOINT, Segmenter
 from .viewport import BACKGROUND, Viewport
-from .widgets import Collapsible, Segmented
+from .widgets import Choice, Collapsible
 from .views import MaskedView
 
 ON_STYLE = "QPushButton:checked { background: palette(highlight); color: palette(highlighted-text); }"
@@ -67,6 +67,10 @@ class MainWindow(QMainWindow):
         self.viewport.render_failed.connect(lambda message: self.statusBar().showMessage(f"Render failed: {message}"))
         self.viewport.prompts_changed.connect(self.update_prompt_state)
         self.viewport.select_requested.connect(self.pick_region)
+        self.preview_box = Choice(self.viewport.object_button, ("Scene", "Object only"))  # the two on-screen toggles, read like combo boxes
+        self.preview_box.currentIndexChanged.connect(self.update_preview)
+        self.background_box = Choice(self.viewport.background_button, ("White", "Black"))
+        self.background_box.currentIndexChanged.connect(self.update_background)
         self.viewport.failed.connect(lambda message: QMessageBox.warning(self, "Cannot make a mask", message))
 
         self._make_actions()
@@ -240,16 +244,6 @@ class MainWindow(QMainWindow):
     def _clean_box(self):
         box = QGroupBox("3  Clean up")
         column = QFormLayout(box)
-        self.preview_box = Segmented(["Scene", "Object only"])
-        self.preview_box.currentIndexChanged.connect(self.update_preview)
-        self.background_box = QComboBox()
-        self.background_box.addItems(["White", "Black"])
-        self.background_box.currentIndexChanged.connect(self.update_background)
-        self.box_check = QCheckBox("Bounding box")
-        self.box_check.setChecked(True)
-        self.box_check.setToolTip("Draw the box round the Gaussians that are left, so stray ones show as extra room. "
-                                  "Its size is in the scene's own units")
-        self.box_check.toggled.connect(self.viewport.set_box_visible)
         self.pick_button = QPushButton("Select")
         self.pick_button.setCheckable(True)
         self.pick_button.setStyleSheet(ON_STYLE)
@@ -267,9 +261,6 @@ class MainWindow(QMainWindow):
         strays = QHBoxLayout()
         for button in (self.pick_button, self.delete_button, self.undo_delete_button):
             strays.addWidget(button, 1)
-        column.addRow("Show", self.preview_box)
-        column.addRow("Background", self.background_box)
-        column.addRow(self.box_check)
         column.addRow(strays)
         column.addRow(self.pick_label)
         return box
@@ -372,6 +363,7 @@ class MainWindow(QMainWindow):
         self.scene_renderer = renderer
         self.viewport.set_scene(renderer, kept["orbit"])
         self.preview_box.setCurrentIndex(kept["preview"])  # shows the object again when it was on screen
+        self.refresh_box()
         self.update_extraction_state()
 
     def scene_loaded(self, scene, renderer, up, orbit):
@@ -417,6 +409,7 @@ class MainWindow(QMainWindow):
         if self.viewport.orbit is not None:
             self.viewport.orbit.set_up(self.up_vector())
             self.viewport.view_changed()
+        self.refresh_box()  # the box stands on the up axis
 
     def reset_view(self):
         if self.extraction_job is None and self.scene is not None:
@@ -545,7 +538,6 @@ class MainWindow(QMainWindow):
         self.export_button.setEnabled(result and not busy)
         self.preview_box.setEnabled(result and not busy)
         self.background_box.setEnabled(result and preview and not busy)
-        self.box_check.setEnabled(result and preview and not busy)
         self.refine_button.setEnabled(result and bool(self.views) and not busy)
         self.revert_button.setEnabled(self._refined is not None and not busy)
         picked = self._picked is not None and bool(self._picked.any())
@@ -566,6 +558,7 @@ class MainWindow(QMainWindow):
 
     def invalidate_result(self):
         self.stages = self._extracted = self._picked = self._refined = None
+        self.viewport.set_box(None)
         self._deleted.clear()
         self.object_scene = None
         self.preview_box.setCurrentIndex(0)
@@ -598,6 +591,14 @@ class MainWindow(QMainWindow):
             fitted, at = self._refit_lookup(cleaned)
             scales[fitted] *= self._refined["scale_factors"][at[fitted]]
         return scales
+
+    def refresh_box(self):
+        """The box round what is kept, for the scene and the object alone alike; none while there is no result."""
+        if self.scene is None or self.stages is None or not self.stages["cleaned"].any():
+            self.viewport.set_box(None)
+            return
+        corners, size = bounding_box(self.scene.means[self.stages["cleaned"]], self.up_vector())
+        self.viewport.set_box(corners, size)
 
     def _refit_lookup(self, cleaned):
         """Which of the object's Gaussians have a refit, and where it is kept: what was deleted since simply has no entry left."""
@@ -656,9 +657,6 @@ class MainWindow(QMainWindow):
                 background = (1., 1., 1.) if self.background_box.currentIndex() == 0 else (0., 0., 0.)
                 self.viewport.set_preview(np.ones(len(object_scene), bool), background, renderer=renderer)
                 self.viewport.set_selecting(selecting)
-                corners, size = bounding_box(object_scene.means, self.up_vector())
-                self.viewport.set_box(corners)
-                self.box_check.setText("Bounding box  " + " × ".join(f"{v:.2f}" for v in size))
                 if self._frame_result:
                     self.frame_object()
                     self.viewport.view_changed()
@@ -668,7 +666,7 @@ class MainWindow(QMainWindow):
             self.viewport.set_preview(renderer=self.scene_renderer)
         if not showing:
             self._picked = None
-            self.box_check.setText("Bounding box")
+        self.refresh_box()
         self.select_action.setChecked(self.viewport.selecting)
         self.update_hint()
         self.update_extraction_state()

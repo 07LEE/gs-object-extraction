@@ -1,48 +1,36 @@
 """Small controls for the side panel."""
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QButtonGroup, QHBoxLayout, QPushButton, QToolButton, QVBoxLayout, QWidget
+from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtWidgets import QToolButton, QVBoxLayout, QWidget
 
 
-class Segmented(QWidget):
-    """A row of buttons of which exactly one is down; the same calls as a combo box, for a choice that is changed often."""
+class Choice(QObject):
+    """Two named states behind a checkable button, with the calls of a combo box: the button is the control, this is how the window reads it."""
 
     currentIndexChanged = Signal(int)
 
-    def __init__(self, items, parent=None):
+    def __init__(self, button, names, parent=None):
         super().__init__(parent)
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-        self._group = QButtonGroup(self)
-        self._buttons = []
-        for index, text in enumerate(items):
-            button = QPushButton(text)
-            button.setCheckable(True)
-            button.setStyleSheet("QPushButton:checked { background: palette(highlight); color: palette(highlighted-text); }")
-            self._group.addButton(button, index)
-            layout.addWidget(button, 1)
-            self._buttons.append(button)
-        self._buttons[0].setChecked(True)
-        self._index = 0
-        self._group.idClicked.connect(self.setCurrentIndex)
+        self._button, self._names = button, tuple(names)
+        button.toggled.connect(lambda on: self.currentIndexChanged.emit(int(on)))
 
     def currentIndex(self):
-        return self._index
+        return int(self._button.isChecked())
 
     def currentText(self):
-        return self._buttons[self._index].text()
+        return self._names[self.currentIndex()]
 
     def setCurrentIndex(self, index):
-        self._buttons[index].setChecked(True)
-        if index != self._index:
-            self._index = index
-            self.currentIndexChanged.emit(index)
+        self._button.setChecked(bool(index))
 
     def setCurrentText(self, text):
-        for index, button in enumerate(self._buttons):
-            if button.text() == text:
-                self.setCurrentIndex(index)
+        self.setCurrentIndex(self._names.index(text))
+
+    def isEnabled(self):
+        return self._button.isEnabled()
+
+    def setEnabled(self, on):
+        self._button.setEnabled(on)
 
 
 class Collapsible(QWidget):
