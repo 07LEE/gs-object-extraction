@@ -865,3 +865,103 @@ def test_the_box_round_the_object_follows_what_is_left_and_can_be_hidden(app, ma
     assert not window.viewport.show_box
     window.preview_box.setCurrentText("Scene")
     assert window.viewport.box is None and not window.box_check.isEnabled() and window.box_check.text() == "Bounding box"
+
+
+def fake_refine(renderer, targets, *, steps=None, on_step=None):
+    on_step(1, 2)
+    on_step(2, 2)
+    n = renderer.n
+    return {"opacities": np.full(n, .99), "sh": np.ones((n, 16, 3)), "scale_factors": np.full((n, 3), 1.5),
+            "before": .5, "after": .9}
+
+
+@pytest.fixture
+def refining(monkeypatch):
+    monkeypatch.setattr("gs_object_extraction.app.refining.refine", fake_refine)
+
+
+def refine_object(app, window):
+    window.start_refine()
+    assert window.refine_job is not None
+    wait_until(app, lambda: window.refine_job is None)
+
+
+def test_refining_refits_the_object_and_the_export_carries_it(app, make_window, refining, tmp_path):
+    window, _ = make_window()
+    window.viewport.render_now()
+    assert not window.refine_button.isEnabled()  # nothing extracted yet
+    extract_object(app, window)
+    assert window.refine_button.isEnabled() and not window.revert_button.isEnabled()
+    original = window.trimmed_object(refined=False)
+    refine_object(app, window)
+    assert window.revert_button.isEnabled() and "masks filled 50.0% → 90.0%" in window.result_label.text()
+    assert window.preview_box.currentText() == "Object only" and window.viewport.renderer.n == 2
+    np.testing.assert_allclose(window.object_scene.opacities, .99)
+    np.testing.assert_allclose(window.object_scene.sh, 1.)
+    np.testing.assert_allclose(window.object_scene.scales, original.scales * 1.5)  # sizes come from the refit, on top of the trim
+    np.testing.assert_array_equal(window.object_scene.means, original.means)  # positions stay
+    np.testing.assert_array_equal(window.scene.opacities, make_scene().opacities)  # the scene is not touched
+    window.viewport.render_now()
+    assert export_object(app, window, tmp_path / "refined.ply")
+    np.testing.assert_allclose(load_ply(tmp_path / "refined.ply").opacities, .99, atol=1e-3)
+
+
+def test_what_is_deleted_after_a_refit_leaves_the_rest_refit(app, make_window, refining):
+    window, _ = make_window()
+    show_object(app, window)
+    refine_object(app, window)
+    window.viewport.render_now()
+    window.pick_region(*box_around(window, 0), 0)
+    window.delete_selection()
+    assert len(window.object_scene) == 1
+    np.testing.assert_allclose(window.object_scene.opacities, .99)
+    np.testing.assert_allclose(window.object_scene.scales, window.trimmed_object(refined=False).scales * 1.5)
+    window.undo_delete()
+    assert len(window.object_scene) == 2
+    np.testing.assert_allclose(window.object_scene.opacities, .99)
+
+
+def test_reverting_puts_back_what_extraction_left_and_a_new_extraction_drops_the_refit(app, make_window, refining):
+    window, _ = make_window()
+    extract_object(app, window)
+    left = window.trimmed_object(refined=False).opacities.copy()
+    refine_object(app, window)
+    window.revert_refine()
+    np.testing.assert_allclose(window.object_scene.opacities, left)
+    assert "Refined" not in window.result_label.text() and not window.revert_button.isEnabled()
+    refine_object(app, window)
+    extract_object(app, window)
+    assert window._refined is None and not window.revert_button.isEnabled()
+
+
+def test_a_failed_refit_is_reported_and_changes_nothing(app, make_window, dialogs, monkeypatch):
+    def fail(renderer, targets, *, steps=None, on_step=None):
+        raise RuntimeError("out of memory")
+    monkeypatch.setattr("gs_object_extraction.app.refining.refine", fail)
+    window, _ = make_window()
+    extract_object(app, window)
+    refine_object(app, window)
+    assert dialogs == [("Cannot refine object", "out of memory")] and window._refined is None
+    dialogs.clear()
+
+
+def test_a_refit_can_be_cancelled_and_blocks_editing_meanwhile(app, make_window, monkeypatch):
+    import time
+    started = []
+
+    def slow(renderer, targets, *, steps=None, on_step=None):
+        started.append(True)
+        for step in range(2000):
+            time.sleep(.005)
+            on_step(step, 2000)  # raises once cancelled
+        raise AssertionError("was never cancelled")
+    monkeypatch.setattr("gs_object_extraction.app.refining.refine", slow)
+    window, _ = make_window()
+    extract_object(app, window)
+    window.start_refine()
+    wait_until(app, lambda: bool(started))
+    assert not window.extract_button.isEnabled() and not window.export_action.isEnabled() and not window.refine_button.isEnabled()
+    window.cancel_job()
+    wait_until(app, lambda: window.refine_job is None)
+    assert window._refined is None and not window.revert_button.isEnabled()
+    assert window.refine_button.isEnabled()

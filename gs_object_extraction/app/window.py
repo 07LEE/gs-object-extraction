@@ -12,6 +12,7 @@ from .autoviews import AutoMarkJob, VIEWS
 from .pick import bounding_box, inside_box
 from .export import ExportJob
 from .extraction import ExtractionJob
+from .refining import RefineJob
 from .loading import SceneLoadJob, SegmenterLoadJob
 from .orbit import AXES, DEFAULT_UP, Orbit
 from .segmenter import DEFAULT_CHECKPOINT, Segmenter
@@ -45,6 +46,7 @@ class MainWindow(QMainWindow):
         self.views = []
         self.stages = None
         self.extraction_job = None
+        self.refine_job = None
         self.auto_job = None
         self.export_job = None
         self.load_job = None
@@ -54,6 +56,8 @@ class MainWindow(QMainWindow):
         self._close_pending = False
         self._extracted = None  # the object as extraction left it, before anything was deleted by hand
         self._deleted = []  # the object before each deletion, newest last
+        self._refine_index = None
+        self._refined = None  # {"index", "opacities", "sh"}: the object's Gaussians as refit, keyed by their place in the scene
         self._picked = None  # boolean over the object on screen: the Gaussians selected to delete
         self._frame_result = False  # a fresh extraction is framed when it first goes on screen
         self.viewport = Viewport(self)
@@ -73,6 +77,7 @@ class MainWindow(QMainWindow):
         column.addWidget(self._mark_box())
         column.addWidget(self._extract_box())
         column.addWidget(self._clean_box())
+        column.addWidget(self._refine_box())
         column.addStretch()
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -104,6 +109,13 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Open a Gaussian PLY file")
         self.update_prompt_state()
         self.update_extraction_state()
+
+    def _extracting(self):
+        """Extracting or refining: the object is being worked on, so it must not change under the job."""
+        return self.extraction_job is not None or self.refine_job is not None
+
+    def _working(self):
+        return self._extracting() or self.auto_job is not None
 
     def _action(self, text, shortcut, slot, checkable=False):
         action = QAction(text, self)
@@ -262,6 +274,23 @@ class MainWindow(QMainWindow):
         column.addRow(self.pick_label)
         return box
 
+    def _refine_box(self):
+        box = QGroupBox("4  Refine")
+        column = QVBoxLayout(box)
+        self.refine_button = QPushButton("Refine")
+        self.refine_button.setToolTip("Refit the opacity, colour and size of the kept Gaussians, so the object stands solid on its own. "
+                                      "Fits them to the scene's own renders of the marked views; positions stay and no photos are read. "
+                                      "Set Edge trim first: it is part of what is fitted")
+        self.refine_button.clicked.connect(self.start_refine)
+        self.revert_button = QPushButton("Revert")
+        self.revert_button.setToolTip("Go back to the opacity, colour and size extraction left")
+        self.revert_button.clicked.connect(self.revert_refine)
+        row = QHBoxLayout()
+        row.addWidget(self.refine_button, 1)
+        row.addWidget(self.revert_button, 1)
+        column.addLayout(row)
+        return box
+
     def _footer(self):
         """What must stay in reach whatever the panel is scrolled to: progress, cancel and export."""
         footer = QWidget()
@@ -289,7 +318,7 @@ class MainWindow(QMainWindow):
 
     def open_ply(self, path):
         """Start loading in the background; the scene is replaced only once it is read."""
-        if self.extraction_job is not None or self.load_job is not None:
+        if self._extracting() or self.load_job is not None:
             return False
         self._shown_file = (self.file_label.text(), self.file_label.toolTip())  # what a failed read puts back
         self.file_label.setText(Path(path).name)
@@ -314,7 +343,7 @@ class MainWindow(QMainWindow):
             # Only the GPU side is dropped; the CPU data and the work stay here in case the upload fails.
             self._kept = dict(scene=self.scene, source_path=self.source_path, views=list(self.views),
                               items=[self.view_list.item(row).text() for row in range(self.view_list.count())],
-                              row=self.view_list.currentRow(), stages=self.stages, extracted=self._extracted, deleted=list(self._deleted), auto_up=self.auto_up,
+                              row=self.view_list.currentRow(), stages=self.stages, extracted=self._extracted, refined=self._refined, deleted=list(self._deleted), auto_up=self.auto_up,
                               orbit=self.viewport.orbit or (self._kept or {}).get("orbit"), count=self.count_label.text(),
                               result=self.result_label.text(), preview=self.preview_box.currentIndex())
         self.scene = self.scene_renderer = self.source_path = None
@@ -335,6 +364,7 @@ class MainWindow(QMainWindow):
         self.view_list.setCurrentRow(kept["row"])
         self.count_label.setText(kept["count"])
         self.stages, self._extracted, self._deleted = kept["stages"], kept["extracted"], kept["deleted"]
+        self._refined = kept["refined"]
         self.result_label.setText(kept["result"])
         self.update_extraction_state()
         renderer = self._renderer_for(kept["scene"])  # raises while the GPU cannot take it; _kept stays for the next try
@@ -382,7 +412,7 @@ class MainWindow(QMainWindow):
         return AXES[choice]
 
     def set_up(self, choice):
-        if self.extraction_job is not None:
+        if self._extracting():
             return
         if self.viewport.orbit is not None:
             self.viewport.orbit.set_up(self.up_vector())
@@ -470,7 +500,7 @@ class MainWindow(QMainWindow):
 
     def add_view(self):
         view = self.viewport
-        if (self.extraction_job is not None or view.active is not None or 1 not in view.labels
+        if (self._extracting() or view.active is not None or 1 not in view.labels
                 or view.mask is None or not view.mask.any()):
             return
         marked = MaskedView(view.camera, view.mask.copy(), tuple(view.points), tuple(view.labels))
@@ -483,14 +513,14 @@ class MainWindow(QMainWindow):
 
     def review_view(self, row):
         """Stand where a marked view was taken, with its mask drawn over it."""
-        busy = self.extraction_job is not None or self.auto_job is not None or self.load_job is not None
+        busy = self._working() or self.load_job is not None
         if busy or not 0 <= row < len(self.views):
             return
         if self.viewport.show_view(self.views[row]):
             self.statusBar().showMessage(f"View {row + 1} of {len(self.views)}. Drag to leave it")
 
     def remove_view(self):
-        if self.extraction_job is not None:
+        if self._extracting():
             return
         row = self.view_list.currentRow()
         if 0 <= row < len(self.views):
@@ -503,7 +533,7 @@ class MainWindow(QMainWindow):
             self.update_extraction_state()
 
     def update_extraction_state(self, *_):
-        busy = (self.extraction_job is not None or self.auto_job is not None
+        busy = (self._working()
                 or self.load_job is not None or self.export_job is not None)
         ready = self.scene is not None and self.scene_renderer is not None and bool(self.views) and not busy
         self.auto_button.setEnabled(ready and self.viewport.active is None)
@@ -516,6 +546,8 @@ class MainWindow(QMainWindow):
         self.preview_box.setEnabled(result and not busy)
         self.background_box.setEnabled(result and preview and not busy)
         self.box_check.setEnabled(result and preview and not busy)
+        self.refine_button.setEnabled(result and bool(self.views) and not busy)
+        self.revert_button.setEnabled(self._refined is not None and not busy)
         picked = self._picked is not None and bool(self._picked.any())
         self.delete_action.setEnabled(picked and preview and not busy)
         self.delete_button.setEnabled(self.delete_action.isEnabled())
@@ -533,7 +565,7 @@ class MainWindow(QMainWindow):
         self.update_prompt_state()
 
     def invalidate_result(self):
-        self.stages = self._extracted = self._picked = None
+        self.stages = self._extracted = self._picked = self._refined = None
         self._deleted.clear()
         self.object_scene = None
         self.preview_box.setCurrentIndex(0)
@@ -542,20 +574,36 @@ class MainWindow(QMainWindow):
         self.result_label.setText("Add views, then extract the object")
         self.update_extraction_state()
 
-    def trimmed_object(self):
-        """The object as it will be exported: the selected Gaussians, edges pulled in."""
+    def trimmed_object(self, refined=True):
+        """The object as it will be exported: the selected Gaussians, edges pulled in, and as refit."""
         if self.scene is None or self.stages is None or not self.stages["cleaned"].any():
             return None
         cleaned = self.stages["cleaned"]
         object_scene = self.scene.subset(cleaned)
-        object_scene.scales = self.trimmed_scales()
+        object_scene.scales = self.trimmed_scales(refined)
+        if refined and self._refined is not None:
+            fitted, at = self._refit_lookup(cleaned)
+            opacities, sh = object_scene.opacities.copy(), object_scene.sh.copy()
+            opacities[fitted] = self._refined["opacities"][at[fitted]]
+            sh[fitted] = self._refined["sh"][at[fitted]]
+            object_scene.opacities, object_scene.sh = opacities, sh
         return object_scene
 
-    def trimmed_scales(self):
-        """Always trim from the source sizes so repeated adjustments do not accumulate."""
+    def trimmed_scales(self, refined=True):
+        """Always trim from the source sizes so repeated adjustments do not accumulate; a refit's size factors go on top."""
         cleaned = self.stages["cleaned"]
         factors = trim_scales(self.stages["off"][cleaned], factor=self.trim_box.value())
-        return self.scene.scales[cleaned] * factors[:, None]
+        scales = self.scene.scales[cleaned] * factors[:, None]
+        if refined and self._refined is not None:
+            fitted, at = self._refit_lookup(cleaned)
+            scales[fitted] *= self._refined["scale_factors"][at[fitted]]
+        return scales
+
+    def _refit_lookup(self, cleaned):
+        """Which of the object's Gaussians have a refit, and where it is kept: what was deleted since simply has no entry left."""
+        saved, index = self._refined["index"], np.flatnonzero(cleaned)
+        at = np.minimum(np.searchsorted(saved, index), len(saved) - 1)
+        return saved[at] == index, at
 
     def _renderer_for(self, scene):
         if self.renderer_factory is not None:
@@ -565,14 +613,14 @@ class MainWindow(QMainWindow):
 
     def update_background(self, *_):
         """Redraw the existing object without copying or uploading its Gaussians."""
-        if self.extraction_job is not None or self.auto_job is not None or self.viewport.active is None:
+        if self._working() or self.viewport.active is None:
             return
         background = (1., 1., 1.) if self.background_box.currentIndex() == 0 else (0., 0., 0.)
         self.viewport.set_preview(self.viewport.active, background)
 
     def update_trim(self, *_):
         """Update only the displayed object's sizes, keeping its renderer and attributes."""
-        if (self.extraction_job is not None or self.auto_job is not None
+        if (self._working()
                 or self.load_job is not None or self.object_scene is None):
             return
         scales = self.trimmed_scales()
@@ -587,7 +635,7 @@ class MainWindow(QMainWindow):
 
     def update_preview(self, *_):
         """Show the scene, or the object on its own as the export will hold it."""
-        if self.extraction_job is not None or self.auto_job is not None:
+        if self._working():
             return
         showing = (self.preview_box.currentIndex() == 1 and self.stages is not None
                    and self.stages["cleaned"].any() and self.scene_renderer is not None)
@@ -627,7 +675,7 @@ class MainWindow(QMainWindow):
 
     def start_auto_mark(self):
         """Mark a ring of views around the object, using the views marked so far to find it."""
-        if self.extraction_job is not None or self.auto_job is not None or not self.views or self.scene_renderer is None:
+        if self._working() or not self.views or self.scene_renderer is None:
             return
         self.set_selecting(False)
         self.viewport.clear_prompts()
@@ -682,7 +730,7 @@ class MainWindow(QMainWindow):
             self.close()
 
     def start_extraction(self):
-        if self.extraction_job is not None or self.scene is None or self.scene_renderer is None or not self.views:
+        if self._extracting() or self.scene is None or self.scene_renderer is None or not self.views:
             return
         self.set_selecting(False)
         self.viewport.clear_prompts()
@@ -711,6 +759,7 @@ class MainWindow(QMainWindow):
 
     def extraction_succeeded(self, stages):
         self.stages = stages
+        self._refined = None
         self._extracted = stages["cleaned"]
         self._deleted.clear()
         self._frame_result = True
@@ -725,7 +774,10 @@ class MainWindow(QMainWindow):
             return
         extracted = int(self._extracted.sum())
         text = f"{cleaned:,} Gaussians kept · {selected - extracted:,} removed"
-        self.result_label.setText(text + (f" · {extracted - cleaned:,} deleted by hand" if extracted != cleaned else ""))
+        text += f" · {extracted - cleaned:,} deleted by hand" if extracted != cleaned else ""
+        if self._refined is not None:
+            text += f"\nRefined: masks filled {self._refined['before']:.1%} → {self._refined['after']:.1%}"
+        self.result_label.setText(text)
 
     def sync_select_buttons(self):
         """The scene is marked with one button and the object's Gaussians selected with another; only the right one is live."""
@@ -756,7 +808,7 @@ class MainWindow(QMainWindow):
     def pick_region(self, x0, y0, x1, y1, mode):
         """Select the object's Gaussians inside a box drawn on the frame on screen."""
         camera = self.viewport.camera
-        busy = self.extraction_job is not None or self.auto_job is not None or self.export_job is not None
+        busy = self._working() or self.export_job is not None
         if busy or camera is None or self.object_scene is None or self.viewport.active is None:
             return
         hit = inside_box(camera, self.object_scene.means, (x0, y0, x1, y1))
@@ -768,7 +820,7 @@ class MainWindow(QMainWindow):
 
     def delete_selection(self):
         """Take the selected Gaussians out of the object; the preview, the counts and the export follow."""
-        busy = self.extraction_job is not None or self.auto_job is not None or self.export_job is not None
+        busy = self._working() or self.export_job is not None
         if busy or self._picked is None or self.stages is None or self.viewport.active is None:
             return
         if self._picked.all():
@@ -782,7 +834,7 @@ class MainWindow(QMainWindow):
         self._apply_delete(kept, f"Deleted {count:,} Gaussians")
 
     def undo_delete(self):
-        if not self._deleted or self.extraction_job is not None or self.export_job is not None or self.stages is None:
+        if not self._deleted or self._extracting() or self.export_job is not None or self.stages is None:
             return
         self._apply_delete(self._deleted.pop(), "Delete undone")
 
@@ -811,13 +863,74 @@ class MainWindow(QMainWindow):
         if self._close_pending:
             self.close()
 
+    def start_refine(self):
+        """Refit the kept Gaussians' opacity and colour to the scene's own renders of the marked views."""
+        if (self._working() or self.stages is None or not self.stages["cleaned"].any() or not self.views
+                or self.scene_renderer is None):
+            return
+        self.set_selecting(False)
+        self.viewport.clear_prompts()
+        self.viewport.set_suspended(True)
+        self._refine_index = np.flatnonzero(self.stages["cleaned"])
+        job = RefineJob(self.scene_renderer, self.trimmed_object(refined=False), tuple(self.views), self._renderer_for, self)
+        self.refine_job = job
+        job.progress.connect(self.refine_progress)
+        job.succeeded.connect(self.refine_succeeded)
+        job.failed.connect(self.refine_failed)
+        job.cancelled.connect(lambda: self.statusBar().showMessage("Refining cancelled"))
+        job.finished.connect(self.refine_finished)
+        self.progress.setRange(0, 0)
+        self.progress.show()
+        self.cancel_button.setEnabled(True)
+        self.cancel_button.show()
+        self.statusBar().showMessage("Refining the object...")
+        self.update_extraction_state()
+        job.start()
+
+    def refine_progress(self, done, total, stage):
+        self.progress.setRange(0, total)
+        self.progress.setValue(done)
+        if self.cancel_button.isEnabled():
+            self.statusBar().showMessage(f"{stage}: {done}/{total}")
+
+    def refine_succeeded(self, result):
+        self._refined = {"index": self._refine_index, "opacities": result["opacities"], "sh": result["sh"],
+                         "scale_factors": result["scale_factors"], "before": result["before"], "after": result["after"]}
+        self.preview_box.setCurrentIndex(1)  # the refit is on the object, so show the object
+        self.show_counts()
+        self.statusBar().showMessage("Refined the object")
+
+    def refine_failed(self, message):
+        self.statusBar().showMessage("Refining failed")
+        if not self._close_pending:
+            QMessageBox.warning(self, "Cannot refine object", message)
+
+    def refine_finished(self):
+        job, self.refine_job = self.refine_job, None
+        job.deleteLater()
+        self.progress.hide()
+        self.cancel_button.hide()
+        self.update_preview()
+        self.viewport.set_suspended(False)
+        self.update_extraction_state()
+        if self._close_pending:
+            self.close()
+
+    def revert_refine(self):
+        if self._working() or self._refined is None:
+            return
+        self._refined = None
+        self.update_preview()
+        self.show_counts()
+        self.statusBar().showMessage("Back to the opacity, colour and size extraction left")
+
     def cancel_job(self):
-        """Stop whichever of extraction or marking is running, after its current view."""
-        job = self.extraction_job or self.auto_job
+        """Stop whichever of extraction, refining or marking is running, after its current step."""
+        job = self.extraction_job or self.refine_job or self.auto_job
         if job is not None:
             job.requestInterruption()
             self.cancel_button.setEnabled(False)
-            self.statusBar().showMessage("Cancelling after the current view...")
+            self.statusBar().showMessage("Cancelling after the current step...")
 
     cancel_extraction = cancel_job
 
@@ -838,7 +951,7 @@ class MainWindow(QMainWindow):
         Returns whether the export began; ``save_ply`` replaces the target atomically,
         so a failure on the worker leaves whatever was there before untouched.
         """
-        if (self.extraction_job is not None or self.export_job is not None or self.scene is None
+        if (self._extracting() or self.export_job is not None or self.scene is None
                 or self.stages is None or not self.stages["cleaned"].any()):
             return False
         path = Path(path)
@@ -881,7 +994,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         """Let a running thread finish first: Qt cannot destroy one that is still working."""
-        if self.extraction_job is not None or self.auto_job is not None:
+        if self._working():
             self._close_pending = True
             self.cancel_job()
             event.ignore()
