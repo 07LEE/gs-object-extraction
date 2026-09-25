@@ -70,11 +70,14 @@ class Orbit:
         e1 /= np.linalg.norm(e1)
         return u, e1, np.cross(u, e1)
 
+    def _direction(self):
+        """Unit vector from the orbit centre out to the camera."""
+        u, e1, e2 = self._basis()
+        return np.cos(self.pitch) * (np.cos(self.yaw) * e1 + np.sin(self.yaw) * e2) + np.sin(self.pitch) * u
+
     @property
     def eye(self):
-        u, e1, e2 = self._basis()
-        direction = np.cos(self.pitch) * (np.cos(self.yaw) * e1 + np.sin(self.yaw) * e2) + np.sin(self.pitch) * u
-        return self.target + self.distance * direction
+        return self.target + self.distance * self._direction()
 
     def camera(self, width, height):
         return Camera.look_at(self.eye, self.target, int(width), int(height), self.fov_y, self.up,
@@ -84,6 +87,13 @@ class Orbit:
         """Drag by (dx, dy) pixels: the scene turns with the mouse."""
         self.yaw -= dx * speed
         self.pitch = float(np.clip(self.pitch + dy * speed, -PITCH_LIMIT, PITCH_LIMIT))
+
+    def look(self, dx, dy, speed=.005):
+        """Drag by (dx, dy) pixels: the camera stays where it is and turns to look where the mouse goes."""
+        eye = self.eye
+        self.yaw -= dx * speed
+        self.pitch = float(np.clip(self.pitch + dy * speed, -PITCH_LIMIT, PITCH_LIMIT))
+        self.target = eye - self.distance * self._direction()
 
     def pan(self, dx, dy, height):
         """Drag by (dx, dy) pixels: points at the target's depth follow the mouse exactly."""

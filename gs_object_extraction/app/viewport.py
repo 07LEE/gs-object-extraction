@@ -1,10 +1,13 @@
 """3D view widget: renders the scene on the GPU, turns mouse input into orbit moves and collects mask prompts.
 
-Left drag orbits, right or middle drag pans, the wheel zooms toward the orbit
-centre, and a double-click on the scene makes that point the orbit centre.
-In select mode a left click adds an object point and a right click a background
-point; SAM2 turns the points into a mask on the view on screen. Moving the view
-drops points that were not confirmed.
+The camera moves as in Isaac Sim: with Alt held, the left button orbits and the right
+button zooms; the middle button pans and the right button looks around from where the
+camera stands, Alt or not for the middle one; the wheel zooms too, toward the orbit
+centre. A plain left drag belongs to the tool: a double-click on the scene makes that point
+the orbit centre, and in select mode a left click adds an object point and a right click a
+background point; SAM2 turns the points into a mask on the view on screen, and in the
+object preview a left drag selects Gaussians in a box. Moving the view drops points that
+were not confirmed.
 """
 
 import time
@@ -18,6 +21,7 @@ from .pick import EDGES, project
 BACKGROUND = (.13, .13, .14)
 MIN_PICK_ALPHA = .5
 CLICK_SLOP = 4  # pixels a press may move and still count as a click
+ZOOM_DRAG = 8  # pixels of an Alt+right drag that make one step of the wheel
 PICK_RADIUS = 12  # pixels around a click in the object preview that are selected with it
 HIGHLIGHT_RGBA = (255, 40, 40, 255)
 CLOUD_RGBA = (40, 130, 255, 255)  # the kept Gaussians' centres, one pixel each
@@ -522,34 +526,42 @@ class Viewport(QWidget):
         self.view_changed()
 
     def mousePressEvent(self, event):
-        self._press = (event.button(), event.position(), event.position())
+        self._press = (event.button(), event.position(), event.position(), bool(event.modifiers() & Qt.AltModifier))
         self._dragging = False
 
     def mouseMoveEvent(self, event):
         if self._press is None or self.orbit is None:
             return
-        button, start, last = self._press
+        button, start, last, alt = self._press
         if not self._dragging and (event.position() - start).manhattanLength() <= CLICK_SLOP:
             return
         self._dragging = True
         delta = event.position() - last
-        self._press = (button, start, event.position())
-        if button == Qt.LeftButton and self.selecting and self.active is not None:
+        self._press = (button, start, event.position(), alt)
+        if button == Qt.LeftButton and alt:
+            self.orbit.rotate(delta.x(), delta.y())
+        elif button == Qt.RightButton and alt:
+            self.orbit.zoom(-delta.y() / ZOOM_DRAG)  # up is closer
+        elif button == Qt.RightButton:
+            self.orbit.look(delta.x(), delta.y())
+        elif button == Qt.MiddleButton:
+            self.orbit.pan(delta.x(), delta.y(), self.height())
+        elif button == Qt.LeftButton and self.selecting and self.active is not None:
             self._box = (start, event.position())
             self.update()
             return
-        if button == Qt.LeftButton:
-            self.orbit.rotate(delta.x(), delta.y())
-        elif button in (Qt.RightButton, Qt.MiddleButton):
-            self.orbit.pan(delta.x(), delta.y(), self.height())
+        else:
+            return
         self.view_changed()
 
     def mouseReleaseEvent(self, event):
         press, self._press = self._press, None
-        if press is not None and press[0] == Qt.LeftButton and self.selecting and self.active is not None and self.camera is not None:
+        if press is None or press[3] or press[0] == Qt.MiddleButton:  # Alt or the middle button: the camera's, never a click
+            return
+        if press[0] == Qt.LeftButton and self.selecting and self.active is not None and self.camera is not None:
             self._pick(press[1], event.position(), self._dragging, event.modifiers())
             return
-        if press is None or self._dragging or not self.selecting:
+        if self._dragging or not self.selecting:  # a right drag looked around; only a right click marks the background
             return
         if press[0] in (Qt.LeftButton, Qt.RightButton):
             self.add_point(event.position().x(), event.position().y(), 1 if press[0] == Qt.LeftButton else 0)

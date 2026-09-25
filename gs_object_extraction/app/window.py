@@ -22,10 +22,12 @@ from .views import MaskedView
 
 ON_STYLE = "QPushButton:checked { background: palette(highlight); color: palette(highlighted-text); }"
 TITLE = "3D Gaussian Splatting Object Extraction"
-NAVIGATE_HINT = "Left drag: orbit   Right drag: pan   Wheel: zoom   Double-click: rotation centre   S: select"
+NAVIGATE_HINT = ("Alt + left drag: orbit   Middle drag: pan   Right drag: look   Alt + right drag or wheel: zoom   "
+                 "Double-click: rotation centre   S: select")
 SELECT_HINT = ("Left click: object point   Right click: background point   Backspace: undo   Esc: clear   "
                "Enter: add view   S: navigate")
-PREVIEW_HINT = "Object preview   Drag: orbit / pan   Wheel: zoom   S: select Gaussians   Ctrl+Shift+S: export"
+PREVIEW_HINT = ("Object preview   Alt + left drag: orbit   Middle drag: pan   Right drag: look   Alt + right drag or wheel: zoom   "
+                "S: select Gaussians   Ctrl+Shift+S: export")
 PICK_HINT = ("Drag: select inside the box   Click: select around the point   Shift: add   Ctrl: take away   "
              "Delete or X: delete the selection   Esc: clear   S: navigate")
 DELETE_HISTORY = 20  # deletions that can be undone

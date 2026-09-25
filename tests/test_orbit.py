@@ -138,3 +138,37 @@ def test_framing_falls_back_when_no_distance_works():
     orbit = frame_scene(renderer, means)
     assert orbit.distance == pytest.approx(.6 * spread)
     assert renderer.tried and max(renderer.tried) == pytest.approx(4. * spread)  # it did try the whole range
+
+
+def test_looking_around_turns_the_view_while_the_camera_stays_where_it_is():
+    orbit = Orbit(np.array([1., 2., 3.]), 4., yaw=.7, pitch=.3, up=(0, 0, 1))
+    eye, distance = orbit.eye.copy(), orbit.distance
+    forward = orbit.target - orbit.eye
+    orbit.look(60, -25)
+    np.testing.assert_allclose(orbit.eye, eye, atol=1e-9)
+    assert orbit.distance == distance and not np.allclose(orbit.target - orbit.eye, forward)
+    assert np.isclose(np.linalg.norm(orbit.target - orbit.eye), distance)
+    orbit.look(-60, 25)  # the same drag backwards turns the view back
+    np.testing.assert_allclose(orbit.target - orbit.eye, forward, atol=1e-9)
+
+
+def test_looking_follows_the_drag_right_turns_right_and_down_turns_down():
+    orbit = Orbit(np.zeros(3), 3., yaw=.4, pitch=.2, up=(0, 0, 1))
+    rotation = orbit.camera(100, 100).world_to_camera[:3, :3]
+    right, up = rotation[0].copy(), -rotation[1]  # the camera's image-right and image-up, in the world
+    forward = rotation[2].copy()
+    orbit.look(40, 0)  # drag right
+    turned = orbit.camera(100, 100).world_to_camera[:3, 2]
+    assert (turned - forward) @ right > 0
+    orbit.look(-40, 0)
+    orbit.look(0, 40)  # drag down
+    turned = orbit.camera(100, 100).world_to_camera[:3, 2]
+    assert (turned - forward) @ up < 0
+
+
+def test_the_pitch_of_a_look_is_limited():
+    orbit = Orbit(np.zeros(3), 3., yaw=0., pitch=0., up=(0, 0, 1))
+    orbit.look(0, 1e6)
+    assert abs(orbit.pitch) <= np.deg2rad(89.) + 1e-9
+    orbit.look(0, -1e7)
+    assert abs(orbit.pitch) <= np.deg2rad(89.) + 1e-9

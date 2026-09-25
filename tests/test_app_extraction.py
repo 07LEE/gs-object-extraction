@@ -82,9 +82,9 @@ class FakeRenderer(Exclusive):
         return np.full(shape, 2.), np.ones(shape)
 
 
-def drag(view, start, end, button):
+def drag(view, start, end, button, modifiers=Qt.NoModifier):
     def mouse(kind, x, y, buttons):
-        return QMouseEvent(kind, QPointF(x, y), QPointF(x, y), button, buttons, Qt.NoModifier)
+        return QMouseEvent(kind, QPointF(x, y), QPointF(x, y), button, buttons, modifiers)
 
     view.mousePressEvent(mouse(QEvent.MouseButtonPress, *start, button))
     view.mouseMoveEvent(mouse(QEvent.MouseMove, *end, button))
@@ -453,7 +453,7 @@ def test_extracting_locks_the_inputs_but_leaves_the_view_to_look_at(app, make_wi
     assert len(renderer.image_calls) == frame_count and window.viewport.pick(0, 0) is None
     assert not renderer.depth_calls
     # A drag still turns the camera; the frame it asks for waits for the renderer rather than the job.
-    drag(window.viewport, (60, 40), (90, 40), Qt.LeftButton)
+    drag(window.viewport, (60, 40), (90, 40), Qt.LeftButton, Qt.AltModifier)  # Alt + left orbits
     assert not np.array_equal(window.viewport.orbit.eye, original_eye)
     assert len(renderer.image_calls) == frame_count
     window.cancel_extraction()
@@ -700,7 +700,7 @@ def test_choosing_a_view_stands_where_it_was_marked_and_dragging_leaves_it(app, 
     np.testing.assert_allclose(view.orbit.eye, CAMERA.eye, atol=1e-9)
     np.testing.assert_allclose((view.orbit.target - view.orbit.eye) / view.orbit.distance, forward, atol=1e-9)
     assert view.reviewing is not None and view.reviewing[0] is window.views[0]
-    drag(view, (10, 10), (40, 10), Qt.LeftButton)
+    drag(view, (10, 10), (40, 10), Qt.LeftButton, Qt.AltModifier)
     assert view.reviewing is None
 
 

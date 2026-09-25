@@ -50,9 +50,9 @@ def open_and_wait(window, path):
     return started
 
 
-def mouse(kind, x, y, button):
+def mouse(kind, x, y, button, modifiers=Qt.NoModifier):
     buttons = Qt.NoButton if kind == QEvent.MouseButtonRelease else button
-    return QMouseEvent(kind, QPointF(x, y), QPointF(x, y), button, buttons, Qt.NoModifier)
+    return QMouseEvent(kind, QPointF(x, y), QPointF(x, y), button, buttons, modifiers)
 
 
 @cuda
@@ -73,13 +73,59 @@ def test_opened_scene_renders_and_drags_move_the_camera(app, tmp_path):
     assert shown == tuple(int(v) for v in view.pixels[cy, cx])  # the frame on screen is the rendered one
 
     eye, target = view.orbit.eye.copy(), view.orbit.target.copy()
-    for kind, x in ((QEvent.MouseButtonPress, 100), (QEvent.MouseMove, 160), (QEvent.MouseButtonRelease, 160)):
+    for kind, x in ((QEvent.MouseButtonPress, 100), (QEvent.MouseMove, 160), (QEvent.MouseButtonRelease, 160)):  # Alt + left: orbit
         getattr(view, {QEvent.MouseButtonPress: "mousePressEvent", QEvent.MouseMove: "mouseMoveEvent",
-                       QEvent.MouseButtonRelease: "mouseReleaseEvent"}[kind])(mouse(kind, x, 100, Qt.LeftButton))
+                       QEvent.MouseButtonRelease: "mouseReleaseEvent"}[kind])(mouse(kind, x, 100, Qt.LeftButton, Qt.AltModifier))
     assert not np.allclose(view.orbit.eye, eye) and np.allclose(view.orbit.target, target)
-    view.mousePressEvent(mouse(QEvent.MouseButtonPress, 100, 100, Qt.RightButton))
-    view.mouseMoveEvent(mouse(QEvent.MouseMove, 120, 90, Qt.RightButton))
+    view.mousePressEvent(mouse(QEvent.MouseButtonPress, 100, 100, Qt.MiddleButton))  # middle: pan, with no Alt
+    view.mouseMoveEvent(mouse(QEvent.MouseMove, 120, 90, Qt.MiddleButton))
     assert not np.allclose(view.orbit.target, target)
+
+
+def test_the_camera_moves_with_alt_the_middle_or_the_right_button_and_zooms_on_an_alt_right_drag(app):
+    window, view = ready_window(FakeSegmenter())
+    view.set_scene(FlakyRenderer(), Orbit(np.zeros(3), 3.))
+    view.render_now()
+    eye, target, distance = view.orbit.eye.copy(), view.orbit.target.copy(), view.orbit.distance
+    view.mousePressEvent(mouse(QEvent.MouseButtonPress, 100, 100, Qt.LeftButton))  # a plain left drag is the tool's, not the camera's
+    view.mouseMoveEvent(mouse(QEvent.MouseMove, 180, 40, Qt.LeftButton))
+    view.mouseReleaseEvent(mouse(QEvent.MouseButtonRelease, 180, 40, Qt.LeftButton))
+    assert np.allclose(view.orbit.eye, eye) and np.allclose(view.orbit.target, target)
+    view.mousePressEvent(mouse(QEvent.MouseButtonPress, 100, 100, Qt.RightButton))  # a plain right drag looks around
+    view.mouseMoveEvent(mouse(QEvent.MouseMove, 180, 40, Qt.RightButton))
+    view.mouseReleaseEvent(mouse(QEvent.MouseButtonRelease, 180, 40, Qt.RightButton))
+    assert np.allclose(view.orbit.eye, eye) and not np.allclose(view.orbit.target, target)  # the camera stays, the view turns
+    view.set_scene(FlakyRenderer(), Orbit(np.zeros(3), 3.))  # back where it began for the rest
+    view.render_now()
+    eye, target, distance = view.orbit.eye.copy(), view.orbit.target.copy(), view.orbit.distance
+    view.mousePressEvent(mouse(QEvent.MouseButtonPress, 100, 100, Qt.MiddleButton))  # the middle button always pans
+    view.mouseMoveEvent(mouse(QEvent.MouseMove, 180, 40, Qt.MiddleButton))
+    view.mouseReleaseEvent(mouse(QEvent.MouseButtonRelease, 180, 40, Qt.MiddleButton))
+    assert not np.allclose(view.orbit.target, target) and np.isclose(view.orbit.distance, distance)
+    view.orbit.target = target.copy()
+    view.mousePressEvent(mouse(QEvent.MouseButtonPress, 100, 100, Qt.RightButton, Qt.AltModifier))
+    view.mouseMoveEvent(mouse(QEvent.MouseMove, 100, 60, Qt.RightButton, Qt.AltModifier))  # up is closer
+    assert view.orbit.distance < distance and np.allclose(view.orbit.target, target)
+    closer = view.orbit.distance
+    view.mouseMoveEvent(mouse(QEvent.MouseMove, 100, 120, Qt.RightButton, Qt.AltModifier))  # down is further
+    assert view.orbit.distance > closer
+    view.mouseReleaseEvent(mouse(QEvent.MouseButtonRelease, 100, 120, Qt.RightButton, Qt.AltModifier))
+
+
+def test_an_alt_click_or_drag_in_select_mode_moves_the_camera_and_marks_nothing(app):
+    fake = FakeSegmenter()
+    window, view = ready_window(fake)
+    view.set_scene(FlakyRenderer(), Orbit(np.zeros(3), 3.))
+    view.render_now()
+    window.select_action.trigger()
+    eye = view.orbit.eye.copy()
+    view.mousePressEvent(mouse(QEvent.MouseButtonPress, 100, 80, Qt.LeftButton, Qt.AltModifier))
+    view.mouseReleaseEvent(mouse(QEvent.MouseButtonRelease, 100, 80, Qt.LeftButton, Qt.AltModifier))  # an Alt click
+    assert view.points == [] and not fake.calls
+    view.mousePressEvent(mouse(QEvent.MouseButtonPress, 100, 80, Qt.LeftButton, Qt.AltModifier))
+    view.mouseMoveEvent(mouse(QEvent.MouseMove, 160, 80, Qt.LeftButton, Qt.AltModifier))
+    view.mouseReleaseEvent(mouse(QEvent.MouseButtonRelease, 160, 80, Qt.LeftButton, Qt.AltModifier))
+    assert not np.allclose(view.orbit.eye, eye) and view.points == [] and not fake.calls
 
 
 @cuda
@@ -151,10 +197,10 @@ def click(view, x, y, button):
     view.mouseReleaseEvent(mouse(QEvent.MouseButtonRelease, x, y, button))
 
 
-def drag(view, start, end, button):
-    view.mousePressEvent(mouse(QEvent.MouseButtonPress, *start, button))
-    view.mouseMoveEvent(mouse(QEvent.MouseMove, *end, button))
-    view.mouseReleaseEvent(mouse(QEvent.MouseButtonRelease, *end, button))
+def drag(view, start, end, button, modifiers=Qt.NoModifier):
+    view.mousePressEvent(mouse(QEvent.MouseButtonPress, *start, button, modifiers))
+    view.mouseMoveEvent(mouse(QEvent.MouseMove, *end, button, modifiers))
+    view.mouseReleaseEvent(mouse(QEvent.MouseButtonRelease, *end, button, modifiers))
 
 
 def test_select_mode_clicks_make_a_mask_and_add_view_keeps_it(app):
@@ -184,7 +230,9 @@ def test_moving_the_view_drops_unconfirmed_points_and_drags_are_not_clicks(app):
     window.select_action.trigger()
     click(view, 100, 80, Qt.LeftButton)
     eye = view.orbit.eye.copy()
-    drag(view, (100, 80), (160, 80), Qt.LeftButton)
+    drag(view, (100, 80), (160, 80), Qt.LeftButton)  # without Alt the drag is a tool's, not the camera's: nothing moves
+    assert view.points == [(100, 80)] and view.mask is not None and np.allclose(view.orbit.eye, eye)
+    drag(view, (100, 80), (160, 80), Qt.LeftButton, Qt.AltModifier)  # with Alt the camera moves and the unconfirmed point goes
     assert view.points == [] and view.mask is None and not np.allclose(view.orbit.eye, eye)
     assert len(fake.calls) == 1
 
@@ -350,10 +398,10 @@ def test_select_mode_drag_with_a_frame_drawn_before_release_adds_no_point(app):
     window.select_action.trigger()
     view.mousePressEvent(mouse(QEvent.MouseButtonPress, 100, 80, Qt.LeftButton))
     view.mouseMoveEvent(mouse(QEvent.MouseMove, 160, 80, Qt.LeftButton))
-    view.render_now()  # the app draws the moved view while the button is still held
+    view.render_now()  # the app draws the frame while the button is still held
     assert view.pixels is not None
     view.mouseReleaseEvent(mouse(QEvent.MouseButtonRelease, 160, 80, Qt.LeftButton))
-    assert view.points == [] and not fake.calls
+    assert view.points == [] and not fake.calls  # a drag without Alt is not a click, and it does not move the camera either
 
 
 def test_small_jitter_during_a_click_still_counts_as_a_click(app):
@@ -671,3 +719,19 @@ def test_a_restore_that_fails_keeps_the_work_for_another_try(app, tmp_path, monk
     open_and_wait(window, tmp_path / "new.ply")  # another failed open: the views must not be doubled
     assert window.scene is old and len(window.views) == 1 and window.view_list.count() == 1
     assert window.scene_renderer is not None and window._kept is None
+
+
+def test_a_right_click_still_marks_the_background_and_a_right_drag_looks_instead(app):
+    fake = FakeSegmenter()
+    window, view = ready_window(fake)
+    view.set_scene(FlakyRenderer(), Orbit(np.zeros(3), 3.))
+    view.render_now()
+    window.select_action.trigger()
+    click(view, 100, 80, Qt.LeftButton)
+    click(view, 200, 150, Qt.RightButton)  # a click: a background point
+    assert view.labels == [1, 0]
+    eye, target = view.orbit.eye.copy(), view.orbit.target.copy()
+    calls = len(fake.calls)
+    drag(view, (200, 150), (260, 120), Qt.RightButton)  # a drag: the camera looks around, and marks nothing
+    assert np.allclose(view.orbit.eye, eye) and not np.allclose(view.orbit.target, target)
+    assert len(fake.calls) == calls and view.labels == []  # the view moved, so the unconfirmed points went, as with any camera move
