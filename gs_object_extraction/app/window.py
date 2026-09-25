@@ -2,10 +2,10 @@
 
 from pathlib import Path
 import numpy as np
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSignalBlocker, Qt
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (QComboBox, QDockWidget, QDoubleSpinBox, QFileDialog, QFormLayout,
-                               QGroupBox, QLabel, QListWidget, QMainWindow, QMessageBox, QProgressBar, QPushButton,
+                               QGroupBox, QHBoxLayout, QLabel, QListWidget, QMainWindow, QMessageBox, QProgressBar, QPushButton,
                                QScrollArea, QToolButton, QVBoxLayout, QWidget)
 from ..extract import OFF_MASK, TRIM, trim_scales
 from .autoviews import AutoMarkJob, VIEWS
@@ -46,6 +46,7 @@ class MainWindow(QMainWindow):
         self._kept = None  # the open work, set aside while a new scene goes up
         self.model_job = None
         self._close_pending = False
+        self._frame_result = False  # a fresh extraction is framed when it first goes on screen
         self.viewport = Viewport(self)
         self.viewport.segmenter = Segmenter(checkpoint)
         self.setCentralWidget(self.viewport)
@@ -70,6 +71,7 @@ class MainWindow(QMainWindow):
         dock.setMinimumWidth(300)
         dock.setWidget(scroll)
         dock.setFeatures(QDockWidget.NoDockWidgetFeatures)
+        dock.setTitleBarWidget(QWidget())  # the panel's first group already says Scene
         self.addDockWidget(Qt.RightDockWidgetArea, dock)
 
         self.file_menu = self.menuBar().addMenu("&File")
@@ -112,10 +114,12 @@ class MainWindow(QMainWindow):
         self.up_box.currentTextChanged.connect(self.set_up)
         reset = QPushButton("Reset view")
         reset.clicked.connect(self.reset_view)
+        up = QHBoxLayout()
+        up.addWidget(self.up_box, 1)
+        up.addWidget(reset)
         form.addRow("File", self.file_label)
         form.addRow("Gaussians", self.count_label)
-        form.addRow("Up axis", self.up_box)
-        form.addRow(reset)
+        form.addRow("Up axis", up)
         return box
 
     def _object_box(self):
@@ -124,6 +128,7 @@ class MainWindow(QMainWindow):
         select = QToolButton()
         select.setDefaultAction(self.select_action)
         select.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        select.setStyleSheet("QToolButton:checked { background: palette(highlight); color: palette(highlighted-text); }")
         self.prompt_label = QLabel()
         self.prompt_label.setWordWrap(True)
         self.prompt_label.setMinimumHeight(3 * self.prompt_label.fontMetrics().height())  # room for the mask line
@@ -135,21 +140,28 @@ class MainWindow(QMainWindow):
         self.bigger_button.clicked.connect(self.take_bigger)
         self.bigger_button.hide()
         self.view_list = QListWidget()
+        self.view_list.setMaximumHeight(6 * self.view_list.fontMetrics().height() + 12)  # the panel below has to stay in reach
         self.view_list.currentRowChanged.connect(self.update_extraction_state)
+        self.view_list.currentRowChanged.connect(self.review_view)
+        self.view_list.itemClicked.connect(lambda item: self.review_view(self.view_list.row(item)))
         self.remove_button = QPushButton("Remove view")
         self.remove_button.clicked.connect(self.remove_view)
         self.auto_button = QPushButton("Mark around the object (experimental)")
         self.auto_button.setToolTip("Mark one view first, then this marks a ring of views from it. "
                                     "Check the result: pressing it again keeps what is marked and adds another ring")
         self.auto_button.clicked.connect(self.start_auto_mark)
-        for widget in (select, self.prompt_label, self.bigger_button, self.add_button, QLabel("Views"),
+        marking = QHBoxLayout()
+        marking.addWidget(select)
+        marking.addWidget(self.add_button, 1)
+        column.addLayout(marking)
+        for widget in (self.prompt_label, self.bigger_button, QLabel("Views"),
                        self.view_list, self.remove_button, self.auto_button):
             column.addWidget(widget)
         return box
 
     def _extraction_box(self):
         box = QGroupBox("Extraction")
-        column = QVBoxLayout(box)
+        column = QFormLayout(box)
         self.extract_button = QPushButton("Extract object")
         self.extract_button.clicked.connect(self.start_extraction)
         self.off_threshold_box = QDoubleSpinBox()
@@ -179,11 +191,13 @@ class MainWindow(QMainWindow):
         self.trim_box.valueChanged.connect(self.update_trim)
         self.export_button = QPushButton("Export object PLY...")
         self.export_button.clicked.connect(self.choose_export)
-        for widget in (QLabel("Off-mask limit"), self.off_threshold_box,
-                       self.extract_button, self.result_label, self.progress, self.cancel_button,
-                       QLabel("Preview"), self.preview_box, QLabel("Object background"),
-                       self.background_box, QLabel("Edge trim"), self.trim_box, self.export_button):
-            column.addWidget(widget)
+        column.addRow("Off-mask limit", self.off_threshold_box)
+        for widget in (self.extract_button, self.result_label, self.progress, self.cancel_button):
+            column.addRow(widget)
+        column.addRow("Preview", self.preview_box)
+        column.addRow("Background", self.background_box)
+        column.addRow("Edge trim", self.trim_box)
+        column.addRow(self.export_button)
         return box
 
     def choose_ply(self):
@@ -297,15 +311,18 @@ class MainWindow(QMainWindow):
             if self.viewport.active is None:
                 self.viewport.orbit = Orbit.framing(self.scene.means, up=self.up_vector())
             else:
-                # Fit the whole extracted object, including splat extents.
-                shown = self.object_scene if self.object_scene is not None else self.scene.subset(self.viewport.active)
-                means, scales = shown.means, shown.scales
-                centre = np.median(means, axis=0)
-                radius = float(np.max(np.linalg.norm(means - centre, axis=1) + 3 * scales.max(axis=1)))
-                aspect = self.viewport.width() / max(self.viewport.height(), 1)
-                half_fov = min(np.deg2rad(25), np.arctan(np.tan(np.deg2rad(25)) * aspect))
-                self.viewport.orbit = Orbit(centre, max(1.1 * radius / np.sin(half_fov), 1e-6), up=self.up_vector())
+                self.frame_object()
             self.viewport.view_changed()
+
+    def frame_object(self):
+        """Fit the whole extracted object, including splat extents."""
+        shown = self.object_scene if self.object_scene is not None else self.scene.subset(self.viewport.active)
+        means, scales = shown.means, shown.scales
+        centre = np.median(means, axis=0)
+        radius = float(np.max(np.linalg.norm(means - centre, axis=1) + 3 * scales.max(axis=1)))
+        aspect = self.viewport.width() / max(self.viewport.height(), 1)
+        half_fov = min(np.deg2rad(25), np.arctan(np.tan(np.deg2rad(25)) * aspect))
+        self.viewport.orbit = Orbit(centre, max(1.1 * radius / np.sin(half_fov), 1e-6), up=self.up_vector())
 
     def set_selecting(self, on):
         self.viewport.set_selecting(on)
@@ -377,6 +394,14 @@ class MainWindow(QMainWindow):
         self.update_extraction_state()
         self.statusBar().showMessage(f"{len(self.views)} view(s) marked")
 
+    def review_view(self, row):
+        """Stand where a marked view was taken, with its mask drawn over it."""
+        busy = self.extraction_job is not None or self.auto_job is not None or self.load_job is not None
+        if busy or not 0 <= row < len(self.views):
+            return
+        if self.viewport.show_view(self.views[row]):
+            self.statusBar().showMessage(f"View {row + 1} of {len(self.views)}. Drag to leave it")
+
     def remove_view(self):
         if self.extraction_job is not None:
             return
@@ -384,7 +409,8 @@ class MainWindow(QMainWindow):
         if 0 <= row < len(self.views):
             self.invalidate_result()
             del self.views[row]
-            self.view_list.takeItem(row)
+            with QSignalBlocker(self.view_list):  # the row that takes its place is not a view to go and look at
+                self.view_list.takeItem(row)
             for i, marked in enumerate(self.views):
                 self.view_list.item(i).setText(f"View {i + 1}: {int(marked.mask.sum()):,} px")
             self.update_extraction_state()
@@ -482,6 +508,10 @@ class MainWindow(QMainWindow):
                 self.object_scene = object_scene
                 background = (1., 1., 1.) if self.background_box.currentIndex() == 0 else (0., 0., 0.)
                 self.viewport.set_preview(np.ones(len(object_scene), bool), background, renderer=renderer)
+                if self._frame_result:
+                    self.frame_object()
+                    self.viewport.view_changed()
+                self._frame_result = False
         if not showing:
             self.object_scene = None
             self.viewport.set_preview(renderer=self.scene_renderer)
@@ -575,6 +605,7 @@ class MainWindow(QMainWindow):
 
     def extraction_succeeded(self, stages):
         self.stages = stages
+        self._frame_result = True
         selected, cleaned = int(stages["selected"].sum()), int(stages["cleaned"].sum())
         self.result_label.setText(f"Selected: {selected:,}\nRemoved: {selected - cleaned:,}\nObject: {cleaned:,} Gaussians")
         if not cleaned:

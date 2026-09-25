@@ -677,3 +677,49 @@ def test_showing_a_second_object_frees_the_first_objects_renderer_first(app, mak
     window.renderer_factory = factory
     window.update_preview()
     assert seen == [scene_renderer]
+
+
+def test_a_fresh_extraction_is_framed_once_and_switching_the_preview_keeps_the_camera(app, make_window):
+    window, _ = make_window()
+    window.viewport.orbit = Orbit(np.full(3, 5.), 40.)  # nowhere near the object
+    extract_object(app, window)
+    np.testing.assert_allclose(window.viewport.orbit.target, np.median(window.scene.means[CLEANED], axis=0))
+    window.viewport.orbit.target = np.full(3, 7.)
+    window.preview_box.setCurrentText("Scene")
+    window.preview_box.setCurrentText("Object only")
+    np.testing.assert_allclose(window.viewport.orbit.target, np.full(3, 7.))  # the user's camera is left alone
+
+
+def test_choosing_a_view_stands_where_it_was_marked_and_dragging_leaves_it(app, make_window):
+    window, _ = make_window()
+    view = window.viewport
+    view.orbit = Orbit(np.full(3, 4.), 9., yaw=1.)
+    window.review_view(0)
+    forward = window.views[0].camera.world_to_camera[2, :3]
+    np.testing.assert_allclose(view.orbit.eye, CAMERA.eye, atol=1e-9)
+    np.testing.assert_allclose((view.orbit.target - view.orbit.eye) / view.orbit.distance, forward, atol=1e-9)
+    assert view.reviewing is not None and view.reviewing[0] is window.views[0]
+    drag(view, (10, 10), (40, 10), Qt.LeftButton)
+    assert view.reviewing is None
+
+
+def test_removing_a_view_does_not_send_the_camera_to_the_next_one(app, make_window):
+    window, _ = make_window()
+    window.views.append(MaskedView(CAMERA, MASK.copy(), ((12, 4),), (1,)))
+    window.view_list.addItem("View 2")
+    window.view_list.setCurrentRow(1)  # the last row: taking it out moves the selection up to row 0
+    window.viewport.orbit.target = np.full(3, 3.)
+    window.viewport.view_changed()  # leaves the view the row just showed
+    window.remove_view()
+    assert len(window.views) == 1 and window.viewport.reviewing is None
+    np.testing.assert_allclose(window.viewport.orbit.target, np.full(3, 3.))
+
+
+def test_the_mask_overlay_has_a_solid_outline_over_a_translucent_fill(app):
+    from gs_object_extraction.app.viewport import MASK_RGBA, OUTLINE_RGBA, _mask_image
+    mask = np.zeros((20, 20), bool)
+    mask[5:15, 5:15] = True
+    image = _mask_image(mask)
+    assert image.pixelColor(5, 10).alpha() == OUTLINE_RGBA[3] and image.pixelColor(6, 10).alpha() == OUTLINE_RGBA[3]
+    assert image.pixelColor(10, 10).alpha() == MASK_RGBA[3]
+    assert image.pixelColor(2, 2).alpha() == 0

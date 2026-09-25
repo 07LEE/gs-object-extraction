@@ -19,8 +19,28 @@ MIN_PICK_ALPHA = .5
 CLICK_SLOP = 4  # pixels a press may move and still count as a click
 BUSY_RETRY_MS = 16  # wait this long before asking again for a renderer a background job is using
 MASK_RGBA = (255, 140, 0, 110)
+OUTLINE_RGBA = (255, 255, 255, 230)
+OUTLINE = 2  # pixels
 PARTIAL = 2.  # a candidate this much larger than the mask means the click probably caught a part
 POINT_COLORS = {1: QColor(60, 220, 90), 0: QColor(235, 60, 60)}
+
+
+def _mask_image(mask):
+    """The mask as a translucent fill with a solid outline, which shows on an object of any colour."""
+    inner = mask.copy()
+    for _ in range(OUTLINE):  # peel one pixel per pass, so what is left of the mask is its outline
+        peeled = inner.copy()
+        peeled[1:] &= inner[:-1]
+        peeled[:-1] &= inner[1:]
+        peeled[:, 1:] &= inner[:, :-1]
+        peeled[:, :-1] &= inner[:, 1:]
+        peeled[0] = peeled[-1] = False
+        peeled[:, 0] = peeled[:, -1] = False
+        inner = peeled
+    rgba = np.zeros((*mask.shape, 4), np.uint8)
+    rgba[mask] = MASK_RGBA
+    rgba[mask & ~inner] = OUTLINE_RGBA
+    return QImage(rgba.data, mask.shape[1], mask.shape[0], 4 * mask.shape[1], QImage.Format_RGBA8888).copy()
 
 
 class Viewport(QWidget):
@@ -48,6 +68,7 @@ class Viewport(QWidget):
         self.points, self.labels = [], []
         self.mask = self.score = self._overlay = None
         self.bigger = self.bigger_score = None  # a larger mask SAM2 offered for the same click
+        self.reviewing = None  # (MaskedView, its overlay) while a marked view is shown; moving the view ends it
         self._press = None
         self._dragging = False
         self._timer = QTimer(self)
@@ -100,9 +121,24 @@ class Viewport(QWidget):
 
     def view_changed(self):
         """The camera or the widget size changed: prompts on the old frame no longer apply."""
-        self.pixels = self.camera = None
+        self.pixels = self.camera = self.reviewing = None
         self.clear_prompts()
         self.request()
+
+    def show_view(self, view):
+        """Stand where a marked view was taken and draw its mask and points over the frame.
+
+        Moving the camera afterwards, or resizing the widget, puts the frame back to a plain one.
+        """
+        if self.orbit is None or self.renderer is None:
+            return False
+        camera = view.camera
+        forward = camera.world_to_camera[2, :3]
+        self.orbit.fov_y = float(np.rad2deg(2 * np.arctan(camera.height / 2 / camera.fy)))
+        self.orbit.look_from(camera.eye, camera.eye + forward * self.orbit.distance)
+        self.view_changed()
+        self.reviewing = (view, _mask_image(view.mask))
+        return True
 
     def render_now(self):
         if self.renderer is None or self.orbit is None:
@@ -153,6 +189,7 @@ class Viewport(QWidget):
         """Add a prompt at widget position (x, y) and update the mask."""
         if self.suspended or self.active is not None or self.pixels is None or self.camera is None or self.segmenter is None:
             return
+        self.reviewing = None
         self.points.append(self._to_pixels(x, y))
         self.labels.append(int(label))
         if not self._segment():
@@ -191,11 +228,7 @@ class Viewport(QWidget):
         return True
 
     def _show_mask(self):
-        mask = self.mask
-        rgba = np.zeros((*mask.shape, 4), np.uint8)
-        rgba[mask] = MASK_RGBA
-        self._overlay = QImage(rgba.data, mask.shape[1], mask.shape[0], 4 * mask.shape[1],
-                               QImage.Format_RGBA8888).copy()
+        self._overlay = _mask_image(self.mask)
         self.update()
 
     def _segment(self):
@@ -251,13 +284,20 @@ class Viewport(QWidget):
         painter.drawImage(self.rect(), self.image)
         if self._overlay is not None:
             painter.drawImage(self.rect(), self._overlay)
+        if self.reviewing is not None:
+            view, overlay = self.reviewing
+            painter.drawImage(self.rect(), overlay)
+            self._draw_points(painter, view.points, view.labels, view.camera.width)
         if self.points:
-            scale = self.width() / self.camera.width
-            painter.setRenderHint(QPainter.Antialiasing)
-            painter.setPen(QPen(QColor(255, 255, 255), 1.5))
-            for (px, py), label in zip(self.points, self.labels):
-                painter.setBrush(POINT_COLORS[label])
-                painter.drawEllipse(QPointF((px + .5) * scale, (py + .5) * scale), 5, 5)
+            self._draw_points(painter, self.points, self.labels, self.camera.width)
+
+    def _draw_points(self, painter, points, labels, width):
+        scale = self.width() / width
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(QPen(QColor(255, 255, 255), 1.5))
+        for (px, py), label in zip(points, labels):
+            painter.setBrush(POINT_COLORS[label])
+            painter.drawEllipse(QPointF((px + .5) * scale, (py + .5) * scale), 5, 5)
 
     def resizeEvent(self, event):
         self.view_changed()
