@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (QComboBox, QDockWidget, QDoubleSpinBox, QFileDial
                                QScrollArea, QToolButton, QVBoxLayout, QWidget)
 from ..extract import OFF_MASK, TRIM, trim_scales
 from .autoviews import AutoMarkJob, VIEWS
+from .pick import inside_box
 from .export import ExportJob
 from .extraction import ExtractionJob
 from .loading import SceneLoadJob, SegmenterLoadJob
@@ -21,7 +22,10 @@ TITLE = "3D Gaussian Splatting Object Extraction"
 NAVIGATE_HINT = "Left drag: orbit   Right drag: pan   Wheel: zoom   Double-click: rotation centre   S: select"
 SELECT_HINT = ("Left click: object point   Right click: background point   Backspace: undo   Esc: clear   "
                "Enter: add view   S: navigate")
-PREVIEW_HINT = "Object preview   Drag: orbit / pan   Wheel: zoom   Ctrl+Shift+S: export"
+PREVIEW_HINT = "Object preview   Drag: orbit / pan   Wheel: zoom   S: select Gaussians   Ctrl+Shift+S: export"
+PICK_HINT = ("Drag: select inside the box   Click: select around the point   Shift: add   Ctrl: take away   "
+             "Delete: delete the selection   Esc: clear   S: navigate")
+DELETE_HISTORY = 20  # deletions that can be undone
 
 
 
@@ -46,6 +50,9 @@ class MainWindow(QMainWindow):
         self._kept = None  # the open work, set aside while a new scene goes up
         self.model_job = None
         self._close_pending = False
+        self._extracted = None  # the object as extraction left it, before anything was deleted by hand
+        self._deleted = []  # the object before each deletion, newest last
+        self._picked = None  # boolean over the object on screen: the Gaussians selected to delete
         self._frame_result = False  # a fresh extraction is framed when it first goes on screen
         self.viewport = Viewport(self)
         self.viewport.segmenter = Segmenter(checkpoint)
@@ -53,6 +60,7 @@ class MainWindow(QMainWindow):
         self.viewport.rendered.connect(lambda ms: self.statusBar().showMessage(f"Render {ms:.0f} ms"))
         self.viewport.render_failed.connect(lambda message: self.statusBar().showMessage(f"Render failed: {message}"))
         self.viewport.prompts_changed.connect(self.update_prompt_state)
+        self.viewport.select_requested.connect(self.pick_region)
         self.viewport.failed.connect(lambda message: QMessageBox.warning(self, "Cannot make a mask", message))
 
         self._make_actions()
@@ -79,6 +87,8 @@ class MainWindow(QMainWindow):
         self.select_menu = self.menuBar().addMenu("&Select")
         self.select_menu.addActions([self.select_action, self.add_view_action, self.undo_action, self.clear_action])
         self.menuBar().addMenu("&Extract").addAction(self.extract_action)
+        self.edit_menu = self.menuBar().addMenu("&Edit")
+        self.edit_menu.addActions([self.delete_action, self.undo_delete_action])
         self.hint = QLabel(NAVIGATE_HINT)
         self.statusBar().addPermanentWidget(self.hint)
         self.statusBar().showMessage("Open a Gaussian PLY file")
@@ -100,9 +110,11 @@ class MainWindow(QMainWindow):
         self.select_action = self._action("&Select mode", "S", self.set_selecting, checkable=True)
         self.add_view_action = self._action("&Add view", ("Return", "Enter"), self.add_view)  # main and keypad Enter
         self.undo_action = self._action("&Undo point", "Backspace", self.viewport.undo_point)
-        self.clear_action = self._action("&Clear points", "Esc", self.viewport.clear_prompts)
+        self.clear_action = self._action("&Clear points", "Esc", self.clear_points)
         self.extract_action = self._action("&Extract object", "Ctrl+E", self.start_extraction)
         self.export_action = self._action("&Export object PLY...", "Ctrl+Shift+S", self.choose_export)
+        self.delete_action = self._action("&Delete selection", "Delete", self.delete_selection)
+        self.undo_delete_action = self._action("&Undo delete", "Ctrl+Z", self.undo_delete)
 
     def _scene_box(self):
         box = QGroupBox("Scene")
@@ -140,7 +152,7 @@ class MainWindow(QMainWindow):
         self.bigger_button.clicked.connect(self.take_bigger)
         self.bigger_button.hide()
         self.view_list = QListWidget()
-        self.view_list.setMaximumHeight(6 * self.view_list.fontMetrics().height() + 12)  # the panel below has to stay in reach
+        self.view_list.setMaximumHeight(4 * self.view_list.fontMetrics().height() + 12)  # the panel below has to stay in reach
         self.view_list.currentRowChanged.connect(self.update_extraction_state)
         self.view_list.currentRowChanged.connect(self.review_view)
         self.view_list.itemClicked.connect(lambda item: self.review_view(self.view_list.row(item)))
@@ -197,6 +209,14 @@ class MainWindow(QMainWindow):
         column.addRow("Preview", self.preview_box)
         column.addRow("Background", self.background_box)
         column.addRow("Edge trim", self.trim_box)
+        self.delete_button = QPushButton("Delete selection")
+        self.delete_button.clicked.connect(self.delete_selection)
+        self.undo_delete_button = QPushButton("Undo delete")
+        self.undo_delete_button.clicked.connect(self.undo_delete)
+        deleting = QHBoxLayout()
+        deleting.addWidget(self.delete_button, 1)
+        deleting.addWidget(self.undo_delete_button, 1)
+        column.addRow(deleting)
         column.addRow(self.export_button)
         return box
 
@@ -232,7 +252,7 @@ class MainWindow(QMainWindow):
             # Only the GPU side is dropped; the CPU data and the work stay here in case the upload fails.
             self._kept = dict(scene=self.scene, source_path=self.source_path, views=list(self.views),
                               items=[self.view_list.item(row).text() for row in range(self.view_list.count())],
-                              row=self.view_list.currentRow(), stages=self.stages, auto_up=self.auto_up,
+                              row=self.view_list.currentRow(), stages=self.stages, extracted=self._extracted, deleted=list(self._deleted), auto_up=self.auto_up,
                               orbit=self.viewport.orbit or (self._kept or {}).get("orbit"), count=self.count_label.text(),
                               result=self.result_label.text(), preview=self.preview_box.currentIndex())
         self.scene = self.scene_renderer = self.source_path = None
@@ -252,7 +272,7 @@ class MainWindow(QMainWindow):
         self.view_list.addItems(kept["items"])
         self.view_list.setCurrentRow(kept["row"])
         self.count_label.setText(kept["count"])
-        self.stages = kept["stages"]
+        self.stages, self._extracted, self._deleted = kept["stages"], kept["extracted"], kept["deleted"]
         self.result_label.setText(kept["result"])
         self.update_extraction_state()
         renderer = self._renderer_for(kept["scene"])  # raises while the GPU cannot take it; _kept stays for the next try
@@ -327,9 +347,9 @@ class MainWindow(QMainWindow):
     def set_selecting(self, on):
         self.viewport.set_selecting(on)
         self.select_action.setChecked(self.viewport.selecting)
-        self.hint.setText(PREVIEW_HINT if self.viewport.active is not None else
-                          SELECT_HINT if self.viewport.selecting else NAVIGATE_HINT)
-        if self.viewport.selecting:
+        self.update_hint()
+        self.update_prompt_state()
+        if self.viewport.selecting and self.viewport.active is None:
             self.load_segmenter()
 
     def load_segmenter(self):
@@ -357,7 +377,10 @@ class MainWindow(QMainWindow):
     def update_prompt_state(self):
         view = self.viewport
         if view.active is not None:
-            text = "Choose Scene in Preview to mark more views"
+            picked = 0 if self._picked is None else int(self._picked.sum())
+            text = (f"{picked:,} Gaussians selected. Delete removes them" if picked else
+                    "Drag a box or click to select Gaussians to delete" if view.selecting else
+                    "Press S to select Gaussians to delete, or choose Scene in Preview to mark more views")
         elif not view.points:
             text = "Click the object" if view.selecting else "Press S to mark the object"
         else:
@@ -428,17 +451,24 @@ class MainWindow(QMainWindow):
         self.export_button.setEnabled(result and not busy)
         self.preview_box.setEnabled(result and not busy)
         self.background_box.setEnabled(result and preview and not busy)
+        picked = self._picked is not None and bool(self._picked.any())
+        self.delete_action.setEnabled(picked and preview and not busy)
+        self.delete_button.setEnabled(self.delete_action.isEnabled())
+        self.undo_delete_action.setEnabled(bool(self._deleted) and preview and not busy)
+        self.undo_delete_button.setEnabled(self.undo_delete_action.isEnabled())
         self.open_action.setEnabled(not busy)
         self.scene_box.setEnabled(not busy)
         self.off_threshold_box.setEnabled(not busy)
         self.view_list.setEnabled(not busy)
         self.remove_button.setEnabled(not busy and self.view_list.currentRow() >= 0)
-        for action in (self.select_action, self.undo_action, self.clear_action):
-            action.setEnabled(not busy and not preview)
+        self.select_action.setEnabled(not busy)
+        self.clear_action.setEnabled(not busy)
+        self.undo_action.setEnabled(not busy and not preview)
         self.update_prompt_state()
 
     def invalidate_result(self):
-        self.stages = None
+        self.stages = self._extracted = self._picked = None
+        self._deleted.clear()
         self.object_scene = None
         self.preview_box.setCurrentIndex(0)
         if self.viewport.active is not None:
@@ -495,8 +525,11 @@ class MainWindow(QMainWindow):
             return
         showing = (self.preview_box.currentIndex() == 1 and self.stages is not None
                    and self.stages["cleaned"].any() and self.scene_renderer is not None)
+        selecting = self.viewport.selecting and self.viewport.active is not None  # swapping the object out below must not end it
         if showing:
-            self.set_selecting(False)
+            if self.viewport.active is None:
+                self.set_selecting(False)
+            self._picked = None
             object_scene = self.trimmed_object()
             self.viewport.set_preview(renderer=self.scene_renderer)  # the old object's GPU copy goes before the new one comes
             try:
@@ -508,6 +541,7 @@ class MainWindow(QMainWindow):
                 self.object_scene = object_scene
                 background = (1., 1., 1.) if self.background_box.currentIndex() == 0 else (0., 0., 0.)
                 self.viewport.set_preview(np.ones(len(object_scene), bool), background, renderer=renderer)
+                self.viewport.set_selecting(selecting)
                 if self._frame_result:
                     self.frame_object()
                     self.viewport.view_changed()
@@ -515,8 +549,10 @@ class MainWindow(QMainWindow):
         if not showing:
             self.object_scene = None
             self.viewport.set_preview(renderer=self.scene_renderer)
-        self.hint.setText(PREVIEW_HINT if self.viewport.active is not None else
-                          SELECT_HINT if self.viewport.selecting else NAVIGATE_HINT)
+        if not showing:
+            self._picked = None
+        self.select_action.setChecked(self.viewport.selecting)
+        self.update_hint()
         self.update_extraction_state()
 
     def start_auto_mark(self):
@@ -605,13 +641,77 @@ class MainWindow(QMainWindow):
 
     def extraction_succeeded(self, stages):
         self.stages = stages
+        self._extracted = stages["cleaned"]
+        self._deleted.clear()
         self._frame_result = True
-        selected, cleaned = int(stages["selected"].sum()), int(stages["cleaned"].sum())
-        self.result_label.setText(f"Selected: {selected:,}\nRemoved: {selected - cleaned:,}\nObject: {cleaned:,} Gaussians")
+        self.show_counts()
+        self.preview_box.setCurrentIndex(1 if stages["cleaned"].any() else 0)
+        self.statusBar().showMessage(f"Extraction complete: {int(stages['cleaned'].sum()):,} object Gaussians")
+
+    def show_counts(self):
+        selected, cleaned = int(self.stages["selected"].sum()), int(self.stages["cleaned"].sum())
         if not cleaned:
             self.result_label.setText("No object Gaussians remain. Add or revise the marked views and extract again.")
-        self.preview_box.setCurrentIndex(1 if cleaned else 0)
-        self.statusBar().showMessage(f"Extraction complete: {cleaned:,} object Gaussians")
+            return
+        text = f"Selected: {selected:,}\nRemoved: {selected - int(self._extracted.sum()):,}\nObject: {cleaned:,} Gaussians"
+        deleted = int(self._extracted.sum()) - cleaned
+        self.result_label.setText(text + (f"\nDeleted by hand: {deleted:,}" if deleted else ""))
+
+    def update_hint(self):
+        preview = self.viewport.active is not None
+        self.hint.setText(PICK_HINT if preview and self.viewport.selecting else PREVIEW_HINT if preview else
+                          SELECT_HINT if self.viewport.selecting else NAVIGATE_HINT)
+
+    def clear_points(self):
+        """Escape: drop the points of the view being marked, or the Gaussians selected in the object."""
+        self.viewport.clear_prompts()
+        if self._picked is not None:
+            self.set_picked(None)
+
+    def set_picked(self, picked):
+        """The Gaussians selected to delete, drawn on the object as red dots."""
+        self._picked = picked if picked is not None and picked.any() else None
+        self.viewport.set_highlight(None if self._picked is None else self.object_scene.means[self._picked])
+        self.update_extraction_state()
+
+    def pick_region(self, x0, y0, x1, y1, mode):
+        """Select the object's Gaussians inside a box drawn on the frame on screen."""
+        camera = self.viewport.camera
+        busy = self.extraction_job is not None or self.auto_job is not None or self.export_job is not None
+        if busy or camera is None or self.object_scene is None or self.viewport.active is None:
+            return
+        hit = inside_box(camera, self.object_scene.means, (x0, y0, x1, y1))
+        before = np.zeros(len(hit), bool) if self._picked is None or mode == 0 else self._picked
+        self.set_picked(before | hit if mode != 2 else before & ~hit)
+        count = 0 if self._picked is None else int(self._picked.sum())
+        self.statusBar().showMessage(f"{count:,} Gaussians selected. Press Delete to remove them" if count
+                                     else "Nothing selected there")
+
+    def delete_selection(self):
+        """Take the selected Gaussians out of the object; the preview, the counts and the export follow."""
+        busy = self.extraction_job is not None or self.auto_job is not None or self.export_job is not None
+        if busy or self._picked is None or self.stages is None or self.viewport.active is None:
+            return
+        if self._picked.all():
+            self.statusBar().showMessage("That would delete the whole object")
+            return
+        cleaned = self.stages["cleaned"]
+        kept = cleaned.copy()
+        kept[np.flatnonzero(cleaned)[self._picked]] = False
+        count = int(self._picked.sum())
+        self._deleted = self._deleted[-(DELETE_HISTORY - 1):] + [cleaned]
+        self._apply_delete(kept, f"Deleted {count:,} Gaussians")
+
+    def undo_delete(self):
+        if not self._deleted or self.extraction_job is not None or self.export_job is not None or self.stages is None:
+            return
+        self._apply_delete(self._deleted.pop(), "Delete undone")
+
+    def _apply_delete(self, cleaned, message):
+        self.stages = {**self.stages, "cleaned": cleaned}  # the earlier array stays as it was, for undo
+        self.update_preview()  # rebuilds the object, which drops the selection
+        self.show_counts()
+        self.statusBar().showMessage(message)
 
     def extraction_failed(self, message):
         self.statusBar().showMessage("Extraction failed")

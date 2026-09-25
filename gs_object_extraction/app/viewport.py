@@ -9,14 +9,17 @@ drops points that were not confirmed.
 
 import time
 import numpy as np
-from PySide6.QtCore import QPointF, Qt, QTimer, Signal
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen
 from PySide6.QtWidgets import QApplication, QWidget
 from .orbit import unproject
+from .pick import project
 
 BACKGROUND = (.13, .13, .14)
 MIN_PICK_ALPHA = .5
 CLICK_SLOP = 4  # pixels a press may move and still count as a click
+PICK_RADIUS = 12  # pixels around a click in the object preview that are selected with it
+HIGHLIGHT_RGBA = (255, 40, 40, 255)
 BUSY_RETRY_MS = 16  # wait this long before asking again for a renderer a background job is using
 MASK_RGBA = (255, 140, 0, 110)
 OUTLINE_RGBA = (255, 255, 255, 230)
@@ -48,6 +51,7 @@ class Viewport(QWidget):
     render_failed = Signal(str)
     prompts_changed = Signal()
     failed = Signal(str)
+    select_requested = Signal(float, float, float, float, int)  # a box in the frame's own pixels; 0 replaces, 1 adds to, 2 takes from the selection
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -60,6 +64,9 @@ class Viewport(QWidget):
         self.orbit = None
         self.segmenter = None
         self.selecting = False
+        self.highlight = None  # world points of the Gaussians selected in the object preview, drawn as red dots
+        self._highlight_image = None  # (frame, image) of those dots on the frame on screen
+        self._box = None  # (start, current) of the selection box being dragged, in widget pixels
         self.image = None
         self.render_error = None  # message of the last failed render, shown instead of a stale frame
         self.pixels = None  # uint8 RGB of the frame on screen
@@ -85,6 +92,7 @@ class Viewport(QWidget):
         self._timer.stop()
         self.renderer = self.orbit = self.image = self.pixels = self.camera = self.render_error = None
         self.active, self.background = None, BACKGROUND
+        self.selecting, self.highlight, self._highlight_image, self._box = False, None, None, None
         self.clear_prompts()
 
     def set_preview(self, active=None, background=BACKGROUND, renderer=None):
@@ -99,7 +107,9 @@ class Viewport(QWidget):
             active = np.asarray(active)
             if self.renderer is None or active.shape != (self.renderer.n,) or active.dtype != np.bool_:
                 raise ValueError("preview selection must be a boolean array of shape N")
+        if (active is not None) != (self.active is not None):  # the scene and the object are marked and selected differently
             self.set_selecting(False)
+            self.set_highlight(None)
         self.active, self.background = active, background
         self.view_changed()
 
@@ -268,8 +278,34 @@ class Viewport(QWidget):
         return True
 
     def set_selecting(self, on):
-        self.selecting = bool(on) and self.active is None and not self.suspended
+        """Click the scene to mark the object, or box-select Gaussians of the object shown on its own."""
+        self.selecting = bool(on) and not self.suspended
+        self._box = None
         self.setCursor(Qt.CrossCursor if self.selecting else Qt.ArrowCursor)
+        self.update()
+
+    def set_highlight(self, points):
+        """Draw the selected Gaussians as red dots; ``None`` for no selection."""
+        self.highlight = None if points is None or not len(points) else np.asarray(points, dtype=float)
+        self._highlight_image = None
+        self.update()
+
+    def _highlight_dots(self):
+        camera = self.camera
+        if self._highlight_image is not None and self._highlight_image[0] == self.frame:
+            return self._highlight_image[1]
+        x, y, depth = project(camera, self.highlight)
+        near = depth > camera.near
+        x, y = np.round(x[near]).astype(int), np.round(y[near]).astype(int)
+        rgba = np.zeros((camera.height, camera.width, 4), np.uint8)
+        keep = (x >= 1) & (x < camera.width - 1) & (y >= 1) & (y < camera.height - 1)
+        x, y = x[keep], y[keep]
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                rgba[y + dy, x + dx] = HIGHLIGHT_RGBA
+        image = QImage(rgba.data, camera.width, camera.height, 4 * camera.width, QImage.Format_RGBA8888).copy()
+        self._highlight_image = (self.frame, image)
+        return image
 
     # Qt events
 
@@ -282,6 +318,8 @@ class Viewport(QWidget):
             painter.drawText(self.rect(), Qt.AlignCenter | Qt.TextWordWrap, message)
             return
         painter.drawImage(self.rect(), self.image)
+        if self.highlight is not None and self.camera is not None:
+            painter.drawImage(self.rect(), self._highlight_dots())
         if self._overlay is not None:
             painter.drawImage(self.rect(), self._overlay)
         if self.reviewing is not None:
@@ -290,6 +328,11 @@ class Viewport(QWidget):
             self._draw_points(painter, view.points, view.labels, view.camera.width)
         if self.points:
             self._draw_points(painter, self.points, self.labels, self.camera.width)
+        if self._box is not None:
+            start, end = self._box
+            painter.setPen(QPen(QColor(255, 255, 255), 1, Qt.DashLine))
+            painter.setBrush(QColor(235, 60, 60, 60))
+            painter.drawRect(QRectF(start, end).normalized())
 
     def _draw_points(self, painter, points, labels, width):
         scale = self.width() / width
@@ -315,6 +358,10 @@ class Viewport(QWidget):
         self._dragging = True
         delta = event.position() - last
         self._press = (button, start, event.position())
+        if button == Qt.LeftButton and self.selecting and self.active is not None:
+            self._box = (start, event.position())
+            self.update()
+            return
         if button == Qt.LeftButton:
             self.orbit.rotate(delta.x(), delta.y())
         elif button in (Qt.RightButton, Qt.MiddleButton):
@@ -323,10 +370,24 @@ class Viewport(QWidget):
 
     def mouseReleaseEvent(self, event):
         press, self._press = self._press, None
+        if press is not None and press[0] == Qt.LeftButton and self.selecting and self.active is not None and self.camera is not None:
+            self._pick(press[1], event.position(), self._dragging, event.modifiers())
+            return
         if press is None or self._dragging or not self.selecting:
             return
         if press[0] in (Qt.LeftButton, Qt.RightButton):
             self.add_point(event.position().x(), event.position().y(), 1 if press[0] == Qt.LeftButton else 0)
+
+    def _pick(self, start, end, dragged, modifiers):
+        """A drag selects inside its box, a click selects around the point; Shift adds, Ctrl takes away."""
+        self._box = None
+        self.update()
+        if not dragged:
+            start = QPointF(end.x() - PICK_RADIUS, end.y() - PICK_RADIUS)
+            end = QPointF(end.x() + PICK_RADIUS, end.y() + PICK_RADIUS)
+        mode = 1 if modifiers & Qt.ShiftModifier else 2 if modifiers & Qt.ControlModifier else 0
+        scale = self.camera.width / max(self.width(), 1)
+        self.select_requested.emit(start.x() * scale, start.y() * scale, end.x() * scale, end.y() * scale, mode)
 
     def mouseDoubleClickEvent(self, event):
         if event.button() != Qt.LeftButton or self.orbit is None or self.selecting:

@@ -42,7 +42,8 @@ gs-object-extraction-gui
 2. **Mark a view.** Press **S** for select mode, left-click the object, and SAM2 overlays a mask. Right-click anything the mask wrongly includes to push it back out. When the mask covers the object, press **Enter** to add the view. It joins the *Views* list in the right-hand panel.
 3. **Repeat from other angles.** About 16 views around the object is a useful starting point. Keep the camera low to reduce the ground included in the masks.
 4. **Extract.** Press **Ctrl+E** (or *Extract object* in the panel). The viewport switches to a preview of the object alone, which you can orbit like the scene, and the panel reports how many Gaussians were selected, removed and kept.
-5. **Export.** Press **Ctrl+Shift+S** to write the object as a PLY. The dialog offers `<scene>_object.ply` next to the source scene.
+5. **Delete strays.** In the object preview, press **S**, then drag a box over the specks or click one. The selected Gaussians turn red and stay until you delete them: **Shift** adds to the selection, **Ctrl** takes away, **Esc** clears it, **Delete** removes it and **Ctrl+Z** undoes. A box takes everything under it at any depth, so draw it from an angle where the strays stand clear of the object.
+6. **Export.** Press **Ctrl+Shift+S** to write the object as a PLY. The dialog offers `<scene>_object.ply` next to the source scene.
 
 ### Keys
 
@@ -55,6 +56,7 @@ gs-object-extraction-gui
 | Backspace, Esc | — | Undo a point, clear the points |
 | Enter | — | Add the view |
 | Ctrl+E, Ctrl+Shift+S | Extract the object, export a PLY | Extract the object, export a PLY |
+| Delete, Ctrl+Z | Object preview: delete the selected Gaussians, undo | — |
 
 ### Tuning the result
 

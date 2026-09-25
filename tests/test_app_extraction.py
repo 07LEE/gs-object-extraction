@@ -187,10 +187,11 @@ def test_extract_cleans_hidden_fragments_previews_and_exports_full_gaussians(app
     assert renderer.lift_threads and all(t != threading.get_ident() for t in renderer.lift_threads)
     assert "Removed: 1" in window.result_label.text()
     assert window.preview_box.currentText() == "Object only"
-    assert window.export_action.isEnabled() and not window.select_action.isEnabled()
-    window.set_selecting(True)
+    assert window.export_action.isEnabled() and window.select_action.isEnabled()
+    window.set_selecting(True)  # in the object preview this selects Gaussians; it does not mark a view
     window.viewport.add_point(10, 10, 1)
-    assert not window.viewport.selecting and not window.viewport.points
+    assert window.viewport.selecting and not window.viewport.points
+    window.set_selecting(False)
 
     # The object is drawn from Gaussians of its own, so the whole of it is on screen.
     assert window.viewport.renderer is not renderer and len(window.object_scene) == int(CLEANED.sum())
@@ -723,3 +724,113 @@ def test_the_mask_overlay_has_a_solid_outline_over_a_translucent_fill(app):
     assert image.pixelColor(5, 10).alpha() == OUTLINE_RGBA[3] and image.pixelColor(6, 10).alpha() == OUTLINE_RGBA[3]
     assert image.pixelColor(10, 10).alpha() == MASK_RGBA[3]
     assert image.pixelColor(2, 2).alpha() == 0
+
+
+def box_around(window, index):
+    """A box on the frame on screen that holds exactly the object's ``index``-th Gaussian."""
+    from gs_object_extraction.app.pick import project
+    x, y, _ = project(window.viewport.camera, window.object_scene.means[[index]])
+    return x[0] - 1e-3, y[0] - 1e-3, x[0] + 1e-3, y[0] + 1e-3
+
+
+def show_object(app, window):
+    extract_object(app, window)
+    window.viewport.render_now()
+    window.set_selecting(True)
+
+
+def test_selecting_marks_gaussians_and_only_deleting_removes_them(app, make_window, tmp_path):
+    window, _ = make_window()
+    show_object(app, window)
+    assert window.stages["cleaned"].sum() == 2 and not window.delete_action.isEnabled()
+    window.pick_region(*box_around(window, 0), 0)
+    np.testing.assert_array_equal(window.stages["cleaned"], CLEANED)  # selected, not gone
+    assert window.delete_action.isEnabled() and window.viewport.highlight.shape == (1, 3)
+    np.testing.assert_allclose(window.viewport.highlight[0], window.object_scene.means[0])
+    assert "1 Gaussians selected" in window.prompt_label.text()
+    window.delete_selection()
+    np.testing.assert_array_equal(window.stages["cleaned"], [False, True, False, False, False])
+    assert len(window.object_scene) == 1 and window.viewport.renderer.n == 1
+    assert window.viewport.selecting  # selecting goes on until the user leaves it
+    assert window.viewport.highlight is None and not window.delete_action.isEnabled()
+    assert window.undo_delete_action.isEnabled() and "Deleted by hand: 1" in window.result_label.text()
+    window.viewport.render_now()
+    assert export_object(app, window, tmp_path / "deleted.ply")
+    assert len(load_ply(tmp_path / "deleted.ply")) == 1
+    window.undo_delete()
+    np.testing.assert_array_equal(window.stages["cleaned"], CLEANED)
+    assert len(window.object_scene) == 2 and "Deleted by hand" not in window.result_label.text()
+
+
+def test_shift_adds_ctrl_takes_away_and_a_plain_drag_replaces(app, make_window):
+    window, _ = make_window()
+    show_object(app, window)
+    window.pick_region(*box_around(window, 0), 0)
+    window.pick_region(*box_around(window, 1), 1)
+    np.testing.assert_array_equal(window._picked, [True, True])
+    window.pick_region(*box_around(window, 0), 2)
+    np.testing.assert_array_equal(window._picked, [False, True])
+    window.pick_region(*box_around(window, 0), 0)
+    np.testing.assert_array_equal(window._picked, [True, False])
+    window.clear_points()  # Esc
+    assert window._picked is None and window.viewport.highlight is None
+
+
+def test_the_selection_survives_moving_the_camera_and_deleting_all_of_it_is_refused(app, make_window):
+    window, _ = make_window()
+    show_object(app, window)
+    window.pick_region(-1e6, -1e6, 1e6, 1e6, 0)
+    window.viewport.orbit.rotate(30, 0)
+    window.viewport.view_changed()
+    window.viewport.render_now()
+    assert window._picked.all() and window.viewport.highlight is not None
+    window.delete_selection()
+    assert window.stages["cleaned"].sum() == 2 and "whole object" in window.statusBar().currentMessage()
+    assert not window.undo_delete_action.isEnabled()
+
+
+def test_a_box_that_holds_nothing_selects_nothing(app, make_window):
+    window, _ = make_window()
+    show_object(app, window)
+    window.pick_region(-9e6, -9e6, -8e6, -8e6, 0)
+    assert window._picked is None and not window.delete_action.isEnabled()
+    assert "Nothing selected" in window.statusBar().currentMessage()
+
+
+def test_a_drag_in_the_object_preview_draws_a_box_and_a_click_selects_around_the_point(app, make_window):
+    window, _ = make_window()
+    show_object(app, window)
+    view = window.viewport
+    seen = []
+    view.select_requested.connect(lambda *request: seen.append(request))
+    eye = view.orbit.eye.copy()
+    scale = view.camera.width / view.width()
+    drag(view, (10, 10), (110, 90), Qt.LeftButton)
+    np.testing.assert_allclose(seen[-1][:4], (10 * scale, 10 * scale, 110 * scale, 90 * scale))
+    assert seen[-1][4] == 0
+    np.testing.assert_allclose(view.orbit.eye, eye)  # the drag did not orbit
+    for modifier, mode in ((Qt.NoModifier, 0), (Qt.ShiftModifier, 1), (Qt.ControlModifier, 2)):
+        view.mousePressEvent(QMouseEvent(QEvent.MouseButtonPress, QPointF(50, 60), QPointF(50, 60), Qt.LeftButton, Qt.LeftButton, modifier))
+        view.mouseReleaseEvent(QMouseEvent(QEvent.MouseButtonRelease, QPointF(50, 60), QPointF(50, 60), Qt.LeftButton, Qt.NoButton, modifier))
+        x0, y0, x1, y1, seen_mode = seen[-1]
+        assert (x1 - x0) == pytest.approx(24 * scale) and (x0 + x1) / 2 == pytest.approx(50 * scale) and seen_mode == mode
+
+
+def test_select_mode_ends_with_the_object_preview_and_the_selection_with_the_object(app, make_window):
+    window, _ = make_window()
+    show_object(app, window)
+    window.pick_region(*box_around(window, 0), 0)
+    window.preview_box.setCurrentText("Scene")
+    assert not window.viewport.selecting and not window.select_action.isChecked()
+    assert window._picked is None and window.viewport.highlight is None and not window.delete_action.isEnabled()
+
+
+def test_a_new_extraction_forgets_the_delete_history(app, make_window):
+    window, _ = make_window()
+    show_object(app, window)
+    window.pick_region(*box_around(window, 0), 0)
+    window.delete_selection()
+    assert window.undo_delete_action.isEnabled()
+    extract_object(app, window)
+    assert not window.undo_delete_action.isEnabled()
+    np.testing.assert_array_equal(window.stages["cleaned"], CLEANED)
