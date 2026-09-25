@@ -81,7 +81,6 @@ class MainWindow(QMainWindow):
         column.addWidget(self._mark_box())
         column.addWidget(self._extract_box())
         column.addWidget(self._clean_box())
-        column.addWidget(self._refine_box())
         column.addStretch()
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -242,6 +241,7 @@ class MainWindow(QMainWindow):
         return box
 
     def _clean_box(self):
+        """What is left to do to the extracted object: take strays out by hand, and refit it so it stands solid."""
         box = QGroupBox("3  Clean up")
         column = QFormLayout(box)
         self.pick_button = QPushButton("Select")
@@ -255,19 +255,6 @@ class MainWindow(QMainWindow):
         self.undo_delete_button = QPushButton("Undo")
         self.undo_delete_button.setToolTip("Undo the last delete (Ctrl+Z)")
         self.undo_delete_button.clicked.connect(self.undo_delete)
-        self.pick_label = QLabel()
-        self.pick_label.setWordWrap(True)
-        self.pick_label.setMinimumHeight(self.pick_label.fontMetrics().height())
-        strays = QHBoxLayout()
-        for button in (self.pick_button, self.delete_button, self.undo_delete_button):
-            strays.addWidget(button, 1)
-        column.addRow(strays)
-        column.addRow(self.pick_label)
-        return box
-
-    def _refine_box(self):
-        box = QGroupBox("4  Refine")
-        column = QVBoxLayout(box)
         self.refine_button = QPushButton("Refine")
         self.refine_button.setToolTip("Refit the opacity, colour and size of the kept Gaussians, so the object stands solid on its own. "
                                       "Fits them to the scene's own renders of the marked views; positions stay and no photos are read. "
@@ -276,10 +263,17 @@ class MainWindow(QMainWindow):
         self.revert_button = QPushButton("Revert")
         self.revert_button.setToolTip("Go back to the opacity, colour and size extraction left")
         self.revert_button.clicked.connect(self.revert_refine)
-        row = QHBoxLayout()
-        row.addWidget(self.refine_button, 1)
-        row.addWidget(self.revert_button, 1)
-        column.addLayout(row)
+        self.pick_label = QLabel()
+        self.pick_label.setWordWrap(True)
+        self.pick_label.hide()  # only while there is something to say about the selection
+        strays, refit = QHBoxLayout(), QHBoxLayout()
+        for button in (self.pick_button, self.delete_button, self.undo_delete_button):
+            strays.addWidget(button, 1)
+        for button in (self.refine_button, self.revert_button):
+            refit.addWidget(button, 1)
+        column.addRow("Strays", strays)
+        column.addRow(self.pick_label)
+        column.addRow("Solidity", refit)
         return box
 
     def _footer(self):
@@ -362,6 +356,7 @@ class MainWindow(QMainWindow):
         self._kept = None
         self.scene_renderer = renderer
         self.viewport.set_scene(renderer, kept["orbit"])
+        self.viewport.set_map_cloud(kept["scene"].means)
         self.preview_box.setCurrentIndex(kept["preview"])  # shows the object again when it was on screen
         self.refresh_box()
         self.update_extraction_state()
@@ -374,6 +369,7 @@ class MainWindow(QMainWindow):
         self.auto_up = up
         self.scene_renderer = renderer
         self.viewport.set_scene(renderer, orbit)
+        self.viewport.set_map_cloud(scene.means)
         self.statusBar().showMessage(f"Opened {self.source_path.name}: {len(scene.means):,} Gaussians")
 
     def scene_load_failed(self, path, message):
@@ -485,6 +481,7 @@ class MainWindow(QMainWindow):
                  and view.mask is not None and bool(view.mask.any()))
         self.add_button.setEnabled(ready)
         self.add_view_action.setEnabled(ready)
+        self.pick_label.setVisible(bool(self.pick_label.text()))
 
     def take_bigger(self):
         """Replace the mask with the larger one SAM2 offered for the same click."""
@@ -559,6 +556,7 @@ class MainWindow(QMainWindow):
     def invalidate_result(self):
         self.stages = self._extracted = self._picked = self._refined = None
         self.viewport.set_box(None)
+        self.viewport.set_cloud(None)
         self._deleted.clear()
         self.object_scene = None
         self.preview_box.setCurrentIndex(0)
@@ -593,12 +591,15 @@ class MainWindow(QMainWindow):
         return scales
 
     def refresh_box(self):
-        """The box round what is kept, for the scene and the object alone alike; none while there is no result."""
+        """The box and the blue points for what is kept, for the scene and the object alone alike; none while there is no result."""
         if self.scene is None or self.stages is None or not self.stages["cleaned"].any():
             self.viewport.set_box(None)
+            self.viewport.set_cloud(None)
             return
-        corners, size = bounding_box(self.scene.means[self.stages["cleaned"]], self.up_vector())
+        kept = self.scene.means[self.stages["cleaned"]]
+        corners, size = bounding_box(kept, self.up_vector())
         self.viewport.set_box(corners, size)
+        self.viewport.set_cloud(kept)
 
     def _refit_lookup(self, cleaned):
         """Which of the object's Gaussians have a refit, and where it is kept: what was deleted since simply has no entry left."""

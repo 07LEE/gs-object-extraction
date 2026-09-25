@@ -20,6 +20,10 @@ MIN_PICK_ALPHA = .5
 CLICK_SLOP = 4  # pixels a press may move and still count as a click
 PICK_RADIUS = 12  # pixels around a click in the object preview that are selected with it
 HIGHLIGHT_RGBA = (255, 40, 40, 255)
+CLOUD_RGBA = (40, 130, 255, 255)  # the kept Gaussians' centres, one pixel each
+CLOUD_LIMIT = 300_000  # more points than this are thinned, so a frame stays quick
+MAP_RGBA = (110, 175, 255, 150)  # the whole scene's Gaussians, fainter than the kept ones so the render still reads through
+MAP_LIMIT = 60_000  # ... and fewer of them, for the same reason
 BOX_COLOR = QColor(255, 190, 0)
 OVERLAY_MARGIN = 10  # pixels between the corner of the view and the controls drawn over it
 OVERLAY_STYLE = ("QToolButton, QLabel { background: rgba(0, 0, 0, 120); color: white; border-radius: 4px; padding: 4px; }"
@@ -82,6 +86,13 @@ def _draw_object_only(painter, size):
     painter.drawRoundedRect(QRectF(size * .32, size * .32, size * .36, size * .36), 2, 2)
 
 
+def _draw_points(painter, size):
+    painter.setPen(Qt.NoPen)
+    painter.setBrush(QColor(90, 160, 255))
+    for x, y in ((.25, .3), (.6, .2), (.8, .55), (.4, .6), (.2, .8), (.65, .82)):
+        painter.drawEllipse(QPointF(size * x, size * y), size * .09, size * .09)
+
+
 def _draw_background(painter, size, black):
     painter.setPen(QPen(QColor(255, 255, 255) if black else QColor(70, 70, 70), 1.6))
     painter.setBrush(QColor(0, 0, 0) if black else QColor(255, 255, 255))
@@ -108,9 +119,17 @@ class Viewport(QWidget):
         self.selecting = False
         self.highlight = None  # world points of the Gaussians selected in the object preview, drawn as red dots
         self._highlight_image = None  # (frame, image) of those dots on the frame on screen
+        self.cloud = None  # world points: the centres of the kept Gaussians, drawn as blue dots
+        self.map_cloud = None  # ... and of the scene's Gaussians, thinned, over the scene
+        self.show_cloud = False  # off until asked for: dots over the render make the scene hard to read
+        self._cloud_image = None
+        self._map_image = None
         self.box = None  # corners of the box round the object shown on its own
         self.show_box = True
         # Drawn over the view, top right: the object on its own or the scene, the background it stands on, the box round it and its size
+        self.cloud_button = self._overlay_button(_icon(_draw_points), "Show the Gaussians as blue points: over the scene a thinned sample of "
+                                                 "all of them, and the ones kept by extraction, darker, over both")
+        self.cloud_button.toggled.connect(self.set_cloud_visible)
         self.object_button = self._overlay_button(_icon(_draw_object_only), "Show the object on its own. Off: the whole scene")
         self.background_button = self._overlay_button(_icon(lambda p, s: _draw_background(p, s, False)), "")
         self.background_button.toggled.connect(self._show_background)
@@ -156,8 +175,9 @@ class Viewport(QWidget):
     def _sync_overlay(self):
         """The three controls stay where they are once a scene is open; the ones that mean nothing for what is on screen are greyed out."""
         opened = self.renderer is not None
-        for button in (self.object_button, self.background_button, self.box_button):
+        for button in (self.cloud_button, self.object_button, self.background_button, self.box_button):
             button.setVisible(opened)
+        self.cloud_button.setEnabled(self.cloud is not None or self.map_cloud is not None)
         self.background_button.setEnabled(self.active is not None)
         self.box_button.setEnabled(self.box is not None)
         self.box_label.setVisible(self.box is not None and self.show_box)
@@ -174,6 +194,7 @@ class Viewport(QWidget):
         self.renderer = self.orbit = self.image = self.pixels = self.camera = self.render_error = None
         self.active, self.background = None, BACKGROUND
         self.selecting, self.highlight, self._highlight_image, self._box, self.box = False, None, None, None, None
+        self.cloud, self._cloud_image, self.map_cloud, self._map_image = None, None, None, None
         self._sync_overlay()
         self.clear_prompts()
 
@@ -374,16 +395,38 @@ class Viewport(QWidget):
         self._sync_overlay()
         self.update()
 
+    def set_map_cloud(self, points):
+        """A thinned sample of every Gaussian of the scene, drawn faintly over the scene itself; ``None`` for none."""
+        if points is not None and len(points) > MAP_LIMIT:
+            points = points[::-(-len(points) // MAP_LIMIT)]
+        self.map_cloud = None if points is None or not len(points) else np.asarray(points, dtype=float)
+        self._map_image = None
+        self._sync_overlay()
+        self.update()
+
+    def set_cloud(self, points):
+        """The centres of the kept Gaussians, drawn as blue dots over the scene or the object alone; ``None`` for none."""
+        if points is not None and len(points) > CLOUD_LIMIT:
+            points = points[::-(-len(points) // CLOUD_LIMIT)]
+        self.cloud = None if points is None or not len(points) else np.asarray(points, dtype=float)
+        self._cloud_image = None
+        self._sync_overlay()
+        self.update()
+
+    def set_cloud_visible(self, on):
+        self.show_cloud = bool(on)
+        self.update()
+
     def set_box_visible(self, on):
         self.show_box = bool(on)
         self.box_label.setVisible(self.box is not None and self.show_box)
         self.update()
 
     def _place_overlay(self):
-        """Top right corner, from the right: the box, the background, the object or scene, and the box's size."""
+        """Top right corner, from the right: the box, the background, the object or scene, the points, and the box's size."""
         x = self.width() - OVERLAY_MARGIN
         top = OVERLAY_MARGIN
-        for button in (self.box_button, self.background_button, self.object_button):
+        for button in (self.box_button, self.background_button, self.object_button, self.cloud_button):
             button.adjustSize()
             if button.isVisibleTo(self):
                 x -= button.width()
@@ -398,22 +441,34 @@ class Viewport(QWidget):
         self._highlight_image = None
         self.update()
 
-    def _highlight_dots(self):
+    def _dots(self, points, colour, radius):
+        """The frame's pixels with a dot of ``radius`` at each point that lands on it; a cache is the caller's."""
         camera = self.camera
-        if self._highlight_image is not None and self._highlight_image[0] == self.frame:
-            return self._highlight_image[1]
-        x, y, depth = project(camera, self.highlight)
+        x, y, depth = project(camera, points)
         near = depth > camera.near
         x, y = np.round(x[near]).astype(int), np.round(y[near]).astype(int)
         rgba = np.zeros((camera.height, camera.width, 4), np.uint8)
-        keep = (x >= 1) & (x < camera.width - 1) & (y >= 1) & (y < camera.height - 1)
+        keep = (x >= radius) & (x < camera.width - radius) & (y >= radius) & (y < camera.height - radius)
         x, y = x[keep], y[keep]
-        for dy in (-1, 0, 1):
-            for dx in (-1, 0, 1):
-                rgba[y + dy, x + dx] = HIGHLIGHT_RGBA
-        image = QImage(rgba.data, camera.width, camera.height, 4 * camera.width, QImage.Format_RGBA8888).copy()
-        self._highlight_image = (self.frame, image)
-        return image
+        for dy in range(-radius, radius + 1):
+            for dx in range(-radius, radius + 1):
+                rgba[y + dy, x + dx] = colour
+        return QImage(rgba.data, camera.width, camera.height, 4 * camera.width, QImage.Format_RGBA8888).copy()
+
+    def _highlight_dots(self):
+        if self._highlight_image is None or self._highlight_image[0] != self.frame:
+            self._highlight_image = (self.frame, self._dots(self.highlight, HIGHLIGHT_RGBA, 1))
+        return self._highlight_image[1]
+
+    def _map_dots(self):
+        if self._map_image is None or self._map_image[0] != self.frame:
+            self._map_image = (self.frame, self._dots(self.map_cloud, MAP_RGBA, 0))
+        return self._map_image[1]
+
+    def _cloud_dots(self):
+        if self._cloud_image is None or self._cloud_image[0] != self.frame:
+            self._cloud_image = (self.frame, self._dots(self.cloud, CLOUD_RGBA, 0))
+        return self._cloud_image[1]
 
     # Qt events
 
@@ -426,6 +481,10 @@ class Viewport(QWidget):
             painter.drawText(self.rect(), Qt.AlignCenter | Qt.TextWordWrap, message)
             return
         painter.drawImage(self.rect(), self.image)
+        if self.map_cloud is not None and self.show_cloud and self.camera is not None and self.active is None:
+            painter.drawImage(self.rect(), self._map_dots())
+        if self.cloud is not None and self.show_cloud and self.camera is not None:
+            painter.drawImage(self.rect(), self._cloud_dots())
         if self.box is not None and self.show_box and self.camera is not None:
             x, y, depth = project(self.camera, self.box)
             scale = self.width() / self.camera.width

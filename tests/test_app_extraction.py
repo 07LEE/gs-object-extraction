@@ -998,3 +998,63 @@ def test_the_object_and_background_toggles_sit_over_the_view_and_drive_the_previ
     assert xs == sorted(xs) and view.box_button.x() + view.box_button.width() <= view.width()  # in a row, inside the view
     assert view.box_label.x() + view.box_label.width() < view.object_button.x()
     assert not any(hasattr(window, name) for name in ("box_check",))
+
+
+def test_the_kept_gaussians_show_as_blue_points_once_the_icon_is_turned_on(app, make_window):
+    from gs_object_extraction.app.pick import project
+    from gs_object_extraction.app.viewport import CLOUD_RGBA
+    window, _ = make_window()
+    view = window.viewport
+    view.set_map_cloud(window.scene.means)  # what opening a scene does
+    assert view.cloud_button.isVisible() and view.cloud is None  # nothing kept yet
+    show_object(app, window)
+    assert view.cloud_button.isEnabled() and not view.cloud_button.isChecked() and not view.show_cloud  # off until asked for
+    view.cloud_button.click()
+    assert view.show_cloud
+    np.testing.assert_allclose(view.cloud, window.scene.means[window.stages["cleaned"]])
+    view.render_now()
+    image = view._cloud_dots()
+    x, y, _ = project(view.camera, view.cloud)
+    for px, py in zip(np.round(x).astype(int), np.round(y).astype(int)):
+        assert image.pixelColor(px, py).getRgb() == CLOUD_RGBA  # a blue dot where each kept Gaussian lands
+    assert image.pixelColor(0, 0).alpha() == 0
+    window.preview_box.setCurrentText("Scene")
+    assert view.cloud is not None  # the points show over the scene as well
+    view.cloud_button.click()
+    assert not view.show_cloud
+    window.invalidate_result()
+    assert view.cloud is None and view.cloud_button.isEnabled()  # the scene's own points are still there
+
+
+def test_a_huge_object_is_thinned_before_it_is_drawn_as_points(app, make_window):
+    from gs_object_extraction.app import viewport as viewport_module
+    window, _ = make_window()
+    points = np.random.default_rng(6).normal(size=(viewport_module.CLOUD_LIMIT * 2 + 7, 3))
+    window.viewport.set_cloud(points)
+    assert len(window.viewport.cloud) <= viewport_module.CLOUD_LIMIT
+
+
+def test_the_scene_shows_its_own_points_faintly_and_the_kept_ones_darker_over_them(app, make_window):
+    from gs_object_extraction.app import viewport as viewport_module
+    from gs_object_extraction.app.pick import project
+    window, _ = make_window()
+    view = window.viewport
+    view.set_map_cloud(window.scene.means)  # what opening a scene does
+    assert view.map_cloud is not None and view.cloud is None and view.cloud_button.isEnabled()
+    view.orbit = Orbit(np.median(window.scene.means, axis=0), 6.)  # look at the points
+    view.view_changed()
+    view.render_now()
+    image = view._map_dots()
+    x, y, depth = project(view.camera, view.map_cloud)
+    on_screen = (depth > view.camera.near) & (x >= 0) & (x < view.camera.width) & (y >= 0) & (y < view.camera.height)
+    assert on_screen.any()
+    for px, py in zip(np.round(x[on_screen]).astype(int), np.round(y[on_screen]).astype(int)):
+        if 0 <= px < view.camera.width and 0 <= py < view.camera.height:
+            assert image.pixelColor(px, py).getRgb() == viewport_module.MAP_RGBA  # a fainter dot for the scene's Gaussians
+    assert viewport_module.MAP_RGBA[3] < viewport_module.CLOUD_RGBA[3] and viewport_module.MAP_LIMIT < viewport_module.CLOUD_LIMIT
+    show_object(app, window)  # the object on its own: the scene's points are not drawn behind it
+    assert view.active is not None and view.cloud is not None
+    view.set_map_cloud(np.random.default_rng(2).normal(size=(viewport_module.MAP_LIMIT * 3 + 5, 3)))
+    assert len(view.map_cloud) <= viewport_module.MAP_LIMIT
+    view.clear()
+    assert view.map_cloud is None and view.cloud is None
