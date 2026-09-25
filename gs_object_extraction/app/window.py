@@ -4,12 +4,12 @@ from pathlib import Path
 import numpy as np
 from PySide6.QtCore import QSignalBlocker, Qt
 from PySide6.QtGui import QAction, QKeySequence
-from PySide6.QtWidgets import (QComboBox, QDockWidget, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame,
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDockWidget, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame,
                                QGroupBox, QHBoxLayout, QLabel, QListWidget, QMainWindow, QMessageBox, QProgressBar, QPushButton,
                                QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
 from ..extract import OFF_MASK, TRIM, trim_scales
 from .autoviews import AutoMarkJob, VIEWS
-from .pick import inside_box
+from .pick import bounding_box, inside_box
 from .export import ExportJob
 from .extraction import ExtractionJob
 from .loading import SceneLoadJob, SegmenterLoadJob
@@ -233,6 +233,11 @@ class MainWindow(QMainWindow):
         self.background_box = QComboBox()
         self.background_box.addItems(["White", "Black"])
         self.background_box.currentIndexChanged.connect(self.update_background)
+        self.box_check = QCheckBox("Bounding box")
+        self.box_check.setChecked(True)
+        self.box_check.setToolTip("Draw the box round the Gaussians that are left, so stray ones show as extra room. "
+                                  "Its size is in the scene's own units")
+        self.box_check.toggled.connect(self.viewport.set_box_visible)
         self.pick_button = QPushButton("Select")
         self.pick_button.setCheckable(True)
         self.pick_button.setStyleSheet(ON_STYLE)
@@ -252,6 +257,7 @@ class MainWindow(QMainWindow):
             strays.addWidget(button, 1)
         column.addRow("Show", self.preview_box)
         column.addRow("Background", self.background_box)
+        column.addRow(self.box_check)
         column.addRow(strays)
         column.addRow(self.pick_label)
         return box
@@ -509,6 +515,7 @@ class MainWindow(QMainWindow):
         self.export_button.setEnabled(result and not busy)
         self.preview_box.setEnabled(result and not busy)
         self.background_box.setEnabled(result and preview and not busy)
+        self.box_check.setEnabled(result and preview and not busy)
         picked = self._picked is not None and bool(self._picked.any())
         self.delete_action.setEnabled(picked and preview and not busy)
         self.delete_button.setEnabled(self.delete_action.isEnabled())
@@ -601,6 +608,9 @@ class MainWindow(QMainWindow):
                 background = (1., 1., 1.) if self.background_box.currentIndex() == 0 else (0., 0., 0.)
                 self.viewport.set_preview(np.ones(len(object_scene), bool), background, renderer=renderer)
                 self.viewport.set_selecting(selecting)
+                corners, size = bounding_box(object_scene.means, self.up_vector())
+                self.viewport.set_box(corners)
+                self.box_check.setText("Bounding box  " + " × ".join(f"{v:.2f}" for v in size))
                 if self._frame_result:
                     self.frame_object()
                     self.viewport.view_changed()
@@ -610,6 +620,7 @@ class MainWindow(QMainWindow):
             self.viewport.set_preview(renderer=self.scene_renderer)
         if not showing:
             self._picked = None
+            self.box_check.setText("Bounding box")
         self.select_action.setChecked(self.viewport.selecting)
         self.update_hint()
         self.update_extraction_state()

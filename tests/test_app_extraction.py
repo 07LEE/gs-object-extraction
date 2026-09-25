@@ -847,3 +847,21 @@ def test_the_x_key_deletes_the_selection_and_does_nothing_without_one(app, make_
     window.pick_region(*box_around(window, 0), 0)
     QTest.keyClick(window, Qt.Key_X)
     np.testing.assert_array_equal(window.stages["cleaned"], [False, True, False, False, False])
+
+
+def test_the_box_round_the_object_follows_what_is_left_and_can_be_hidden(app, make_window):
+    window, _ = make_window()
+    assert not window.box_check.isEnabled() and window.viewport.box is None
+    show_object(app, window)
+    assert window.viewport.box.shape == (8, 3) and window.box_check.isEnabled() and window.box_check.isChecked()
+    both = window.viewport.box.copy()
+    means = window.object_scene.means
+    assert "×" in window.box_check.text()
+    assert (both.min(axis=0) <= means.min(axis=0) + 1e-9).all() and (both.max(axis=0) >= means.max(axis=0) - 1e-9).all()
+    window.pick_region(*box_around(window, 0), 0)
+    window.delete_selection()
+    assert not np.allclose(window.viewport.box, both)  # one Gaussian is left, the box shrinks to it
+    window.box_check.setChecked(False)
+    assert not window.viewport.show_box
+    window.preview_box.setCurrentText("Scene")
+    assert window.viewport.box is None and not window.box_check.isEnabled() and window.box_check.text() == "Bounding box"

@@ -13,13 +13,14 @@ from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen
 from PySide6.QtWidgets import QApplication, QWidget
 from .orbit import unproject
-from .pick import project
+from .pick import EDGES, project
 
 BACKGROUND = (.13, .13, .14)
 MIN_PICK_ALPHA = .5
 CLICK_SLOP = 4  # pixels a press may move and still count as a click
 PICK_RADIUS = 12  # pixels around a click in the object preview that are selected with it
 HIGHLIGHT_RGBA = (255, 40, 40, 255)
+BOX_COLOR = QColor(255, 190, 0)
 BUSY_RETRY_MS = 16  # wait this long before asking again for a renderer a background job is using
 MASK_RGBA = (255, 140, 0, 110)
 OUTLINE_RGBA = (255, 255, 255, 230)
@@ -66,6 +67,8 @@ class Viewport(QWidget):
         self.selecting = False
         self.highlight = None  # world points of the Gaussians selected in the object preview, drawn as red dots
         self._highlight_image = None  # (frame, image) of those dots on the frame on screen
+        self.box = None  # corners of the box round the object shown on its own
+        self.show_box = True
         self._box = None  # (start, current) of the selection box being dragged, in widget pixels
         self.image = None
         self.render_error = None  # message of the last failed render, shown instead of a stale frame
@@ -92,7 +95,7 @@ class Viewport(QWidget):
         self._timer.stop()
         self.renderer = self.orbit = self.image = self.pixels = self.camera = self.render_error = None
         self.active, self.background = None, BACKGROUND
-        self.selecting, self.highlight, self._highlight_image, self._box = False, None, None, None
+        self.selecting, self.highlight, self._highlight_image, self._box, self.box = False, None, None, None, None
         self.clear_prompts()
 
     def set_preview(self, active=None, background=BACKGROUND, renderer=None):
@@ -110,6 +113,7 @@ class Viewport(QWidget):
         if (active is not None) != (self.active is not None):  # the scene and the object are marked and selected differently
             self.set_selecting(False)
             self.set_highlight(None)
+            self.set_box(None)
         self.active, self.background = active, background
         self.view_changed()
 
@@ -284,6 +288,15 @@ class Viewport(QWidget):
         self.setCursor(Qt.CrossCursor if self.selecting else Qt.ArrowCursor)
         self.update()
 
+    def set_box(self, corners):
+        """The box round the object, drawn over the preview as twelve lines; ``None`` for no box."""
+        self.box = None if corners is None else np.asarray(corners, dtype=float)
+        self.update()
+
+    def set_box_visible(self, on):
+        self.show_box = bool(on)
+        self.update()
+
     def set_highlight(self, points):
         """Draw the selected Gaussians as red dots; ``None`` for no selection."""
         self.highlight = None if points is None or not len(points) else np.asarray(points, dtype=float)
@@ -318,6 +331,14 @@ class Viewport(QWidget):
             painter.drawText(self.rect(), Qt.AlignCenter | Qt.TextWordWrap, message)
             return
         painter.drawImage(self.rect(), self.image)
+        if self.box is not None and self.show_box and self.camera is not None and self.active is not None:
+            x, y, depth = project(self.camera, self.box)
+            scale = self.width() / self.camera.width
+            painter.setRenderHint(QPainter.Antialiasing)
+            painter.setPen(QPen(BOX_COLOR, 1.5))
+            for i, j in EDGES:
+                if depth[i] > self.camera.near and depth[j] > self.camera.near:  # a corner behind the camera has no place on screen
+                    painter.drawLine(QPointF(x[i] * scale, y[i] * scale), QPointF(x[j] * scale, y[j] * scale))
         if self.highlight is not None and self.camera is not None:
             painter.drawImage(self.rect(), self._highlight_dots())
         if self._overlay is not None:
