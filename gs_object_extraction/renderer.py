@@ -99,11 +99,11 @@ class GsplatRenderer(Exclusive):
         self.n = len(scene.means)
         if self.n == 0:
             raise ValueError("renderer requires a nonempty scene")
-        self.means = self._tensor(scene.means)
-        self.scales = self._tensor(scene.scales)
-        self.rotations = self._tensor(scene.quaternions)
-        self.opacities = self._tensor(scene.opacities)
-        self.sh = self._tensor(scene.sh)
+        self.means = self._upload(scene.means)
+        self.scales = self._upload(scene.scales)
+        self.rotations = self._upload(scene.quaternions)
+        self.opacities = self._upload(scene.opacities)
+        self.sh = self._upload(scene.sh)
         self.degree = int(np.sqrt(scene.sh.shape[1]))-1
         # A reusable pinned staging buffer for lift(): downloading into fresh pageable memory
         # every call measurably cost more than the extra host copy this replaces it with.
@@ -111,6 +111,22 @@ class GsplatRenderer(Exclusive):
 
     def _tensor(self, values):
         return self.torch.as_tensor(np.asarray(values).copy(), dtype=self.torch.float32, device="cuda").contiguous()
+
+    UPLOAD_CHUNK = 1 << 20  # rows converted to float32 at a time on their way to the GPU
+
+    def _upload(self, values):
+        """The scene's array as float32 on the GPU, converted a chunk at a time.
+
+        Copying and converting a large array whole before uploading it holds the array twice over in
+        memory for a moment; a chunk at a time holds one chunk, and the values are the same.
+        """
+        torch = self.torch
+        values = np.asarray(values)
+        out = torch.empty(values.shape, dtype=torch.float32, device="cuda")
+        for start in range(0, len(values), self.UPLOAD_CHUNK):
+            chunk = values[start:start + self.UPLOAD_CHUNK]
+            out[start:start + len(chunk)] = torch.as_tensor(np.ascontiguousarray(chunk, dtype=np.float32)).to("cuda")
+        return out
 
     def update_scales(self, scales):
         """Replace sizes in the existing GPU buffer; leave all other attributes intact."""

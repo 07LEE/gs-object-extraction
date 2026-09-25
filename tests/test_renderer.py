@@ -202,3 +202,24 @@ def test_lift_batch_still_rejects_one_bad_view_even_though_the_round_sums():
         with pytest.raises(RuntimeError, match="invalid"):
             renderer.lift_batch(views)
     assert len(calls) == 2  # the failure was caught right after the second view, not the first
+
+
+def test_the_chunked_upload_gives_the_same_float32_values_as_converting_whole():
+    pytest.importorskip("torch")
+    if os.environ.get("GS_OBJECT_EXTRACTION_TEST_CUDA") != "1":
+        pytest.skip("set GS_OBJECT_EXTRACTION_TEST_CUDA=1 in the GPU environment")
+    from gs_object_extraction.renderer import GsplatRenderer
+    rng = np.random.default_rng(5)
+    n = 2500
+    scene = GaussianScene(rng.normal(0, 3, (n, 3)) * 1e3, np.exp(rng.normal(-3, 2, (n, 3))), np.tile([1., 0, 0, 0], (n, 1)),
+                          rng.uniform(1e-4, 1 - 1e-4, n), rng.normal(0, 1, (n, 16, 3)))
+    normal = GsplatRenderer.UPLOAD_CHUNK
+    GsplatRenderer.UPLOAD_CHUNK = 700  # several chunks and a short last one
+    try:
+        renderer = GsplatRenderer(scene)
+    finally:
+        GsplatRenderer.UPLOAD_CHUNK = normal
+    for name, values in (("means", scene.means), ("scales", scene.scales), ("rotations", scene.quaternions),
+                         ("opacities", scene.opacities), ("sh", scene.sh)):
+        whole = renderer._tensor(values)
+        assert getattr(renderer, name).shape == whole.shape and getattr(renderer, name).equal(whole), name

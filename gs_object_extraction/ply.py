@@ -91,16 +91,21 @@ def _read_header(stream):
 
 
 def _read_vertices(stream, fmt, count, properties):
+    """The vertex records: mapped from the file when binary, so a large scene is never held in memory twice; read while the stream is open."""
     dtype = np.dtype(properties)
     if fmt == "binary_little_endian":
         size = count * dtype.itemsize
-        data = stream.read(size)
-        if len(data) != size:
+        start = stream.tell()
+        stream.seek(0, 2)
+        end = stream.tell()
+        if end - start < size:
             raise ValueError("truncated binary PLY vertex data")
-        vertices = np.frombuffer(data, dtype=dtype).copy()
+        stream.seek(start + size)
         if stream.read().strip():
             raise ValueError("unexpected data after PLY vertices")
-        return vertices
+        if count == 0:
+            return np.empty(0, dtype=dtype)
+        return np.memmap(stream, dtype=dtype, mode="r", offset=start, shape=(count,))
     try:
         tokens = stream.read().decode("ascii").split()
     except UnicodeDecodeError as exc:
@@ -136,8 +141,15 @@ def _sigmoid(values):
     return result
 
 
+LOAD_CHUNK = 1 << 20  # records converted at a time, so the conversions' temporaries stay small however large the scene is
+
+
 def load_ply(path) -> GaussianScene:
-    """Load activated Gaussian parameters, rejecting ordinary point clouds."""
+    """Load activated Gaussian parameters, rejecting ordinary point clouds.
+
+    A binary file is mapped and converted a chunk at a time straight into the arrays the scene
+    keeps, so the peak is those arrays and not several times them.
+    """
     with Path(path).open("rb") as stream:
         fmt, count, properties = _read_header(stream)
         names = {name for name, _ in properties}
@@ -158,43 +170,52 @@ def load_ply(path) -> GaussianScene:
         if malformed:
             raise ValueError(f"unexpected Gaussian parameter fields: {sorted(malformed)}")
         vertices = _read_vertices(stream, fmt, count, properties)
+        sh_count = 1 + len(rest_names) // 3
+        means = np.empty((count, 3))
+        scales = np.empty((count, 3))
+        quaternions = np.empty((count, 4))
+        opacities = np.empty(count)
+        sh = np.empty((count, sh_count, 3))
+        ids = np.empty(count, dtype=np.int64) if "gaussian_id" in names else None
+        # Declared order, not set order: it keeps the file's columns and makes saving reproducible.
+        extras = {name: np.empty(count, dtype=vertices.dtype[name]) for name, _ in properties if name not in reserved}
 
-    def fields(names, dtype=np.float64):
-        # One converting pass over the vertex records, not one strided pass per column.
-        return rfn.structured_to_unstructured(vertices[list(names)], dtype=dtype)
+        def fields(part, columns, dtype=np.float64):
+            # One converting pass over the chunk's records, not one strided pass per column.
+            return rfn.structured_to_unstructured(part[list(columns)], dtype=dtype)
 
-    def columns(prefix, size):
-        return fields(f"{prefix}{i}" for i in range(size))
-
-    means = fields(("x", "y", "z"))
-    with np.errstate(over="ignore", under="ignore"):
-        scales = np.exp(columns("scale_", 3))
-    quaternions = columns("rot_", 4)
-    # Scaling before norm also handles otherwise overflowing, finite raw values.
-    largest = np.max(np.abs(quaternions), axis=1)
-    if np.any(~np.isfinite(largest)) or np.any(largest == 0):
-        raise ValueError("raw PLY rotations must be finite nonzero quaternions")
-    quaternions = quaternions / largest[:, None]
-    quaternions /= np.linalg.norm(quaternions, axis=1)[:, None]
-    opacities = _sigmoid(vertices["opacity"].astype(np.float64))
-    sh_count = 1 + len(rest_names) // 3
-    sh = np.empty((count, sh_count, 3), dtype=np.float64)
-    sh[:, 0, :] = columns("f_dc_", 3)
-    if rest_names:
-        # Graphdeco stores all red coefficients, then green, then blue.
-        raw_rest = fields(rest_names, dtype=np.float32)
-        sh[:, 1:, :] = raw_rest.reshape(count, 3, sh_count - 1).transpose(0, 2, 1)
-    ids = None
-    if "gaussian_id" in names:
-        values = vertices["gaussian_id"]
-        if values.dtype.kind not in "iu":
-            if not np.all(np.isfinite(values)) or not np.all(values == np.floor(values)):
-                raise ValueError("gaussian_id must contain integral values")
-            if np.any(values < -(2.0**63)) or np.any(values >= 2.0**63):
-                raise ValueError("gaussian_id values exceed signed 64-bit range")
-        ids = values.astype(np.int64)
-    # Declared order, not set order: it keeps the file's columns and makes saving reproducible.
-    extras = {name: vertices[name].copy() for name, _ in properties if name not in reserved}
+        for start in range(0, count, LOAD_CHUNK):
+            stop = min(start + LOAD_CHUNK, count)
+            part = vertices[start:stop]
+            means[start:stop] = fields(part, ("x", "y", "z"))
+            with np.errstate(over="ignore", under="ignore"):
+                scales[start:stop] = np.exp(fields(part, (f"scale_{i}" for i in range(3))))
+            raw = fields(part, (f"rot_{i}" for i in range(4)))
+            # Scaling before norm also handles otherwise overflowing, finite raw values.
+            largest = np.max(np.abs(raw), axis=1)
+            if np.any(~np.isfinite(largest)) or np.any(largest == 0):
+                raise ValueError("raw PLY rotations must be finite nonzero quaternions")
+            raw = raw / largest[:, None]
+            raw /= np.linalg.norm(raw, axis=1)[:, None]
+            quaternions[start:stop] = raw
+            opacities[start:stop] = _sigmoid(part["opacity"].astype(np.float64))
+            sh[start:stop, 0, :] = fields(part, (f"f_dc_{i}" for i in range(3)))
+            if rest_names:
+                # Graphdeco stores all red coefficients, then green, then blue.
+                raw_rest = fields(part, rest_names, dtype=np.float32)
+                sh[start:stop, 1:, :] = raw_rest.reshape(stop - start, 3, sh_count - 1).transpose(0, 2, 1)
+            if ids is not None:
+                values = part["gaussian_id"]
+                if values.dtype.kind not in "iu":
+                    if not np.all(np.isfinite(values)) or not np.all(values == np.floor(values)):
+                        raise ValueError("gaussian_id must contain integral values")
+                    if np.any(values < -(2.0**63)) or np.any(values >= 2.0**63):
+                        raise ValueError("gaussian_id values exceed signed 64-bit range")
+                ids[start:stop] = values.astype(np.int64)
+            for name, column in extras.items():
+                column[start:stop] = part[name]
+        part = None
+        del vertices  # the mapping goes before the file closes
     return GaussianScene._adopt(means, scales, quaternions, opacities, sh, ids, extras)  # all freshly built above
 
 
