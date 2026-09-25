@@ -743,6 +743,7 @@ def test_selecting_marks_gaussians_and_only_deleting_removes_them(app, make_wind
     window, _ = make_window()
     show_object(app, window)
     assert window.stages["cleaned"].sum() == 2 and not window.delete_action.isEnabled()
+    assert sorted(k.toString() for k in window.delete_action.shortcuts()) == ["Del", "X"]
     window.pick_region(*box_around(window, 0), 0)
     np.testing.assert_array_equal(window.stages["cleaned"], CLEANED)  # selected, not gone
     assert window.delete_action.isEnabled() and window.viewport.highlight.shape == (1, 3)
@@ -834,3 +835,15 @@ def test_a_new_extraction_forgets_the_delete_history(app, make_window):
     extract_object(app, window)
     assert not window.undo_delete_action.isEnabled()
     np.testing.assert_array_equal(window.stages["cleaned"], CLEANED)
+
+
+def test_the_x_key_deletes_the_selection_and_does_nothing_without_one(app, make_window):
+    from PySide6.QtTest import QTest
+    window, _ = make_window()
+    show_object(app, window)
+    window.activateWindow()
+    QTest.keyClick(window, Qt.Key_X)
+    assert window.stages["cleaned"].sum() == 2  # nothing selected, nothing to delete
+    window.pick_region(*box_around(window, 0), 0)
+    QTest.keyClick(window, Qt.Key_X)
+    np.testing.assert_array_equal(window.stages["cleaned"], [False, True, False, False, False])

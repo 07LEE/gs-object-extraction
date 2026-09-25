@@ -26,7 +26,7 @@ SELECT_HINT = ("Left click: object point   Right click: background point   Backs
                "Enter: add view   S: navigate")
 PREVIEW_HINT = "Object preview   Drag: orbit / pan   Wheel: zoom   S: select Gaussians   Ctrl+Shift+S: export"
 PICK_HINT = ("Drag: select inside the box   Click: select around the point   Shift: add   Ctrl: take away   "
-             "Delete: delete the selection   Esc: clear   S: navigate")
+             "Delete or X: delete the selection   Esc: clear   S: navigate")
 DELETE_HISTORY = 20  # deletions that can be undone
 
 
@@ -123,7 +123,7 @@ class MainWindow(QMainWindow):
         self.clear_action = self._action("&Clear points", "Esc", self.clear_points)
         self.extract_action = self._action("&Extract object", "Ctrl+E", self.start_extraction)
         self.export_action = self._action("&Export object PLY...", "Ctrl+Shift+S", self.choose_export)
-        self.delete_action = self._action("&Delete selection", "Delete", self.delete_selection)
+        self.delete_action = self._action("&Delete selection", ("Delete", "X"), self.delete_selection)
         self.undo_delete_action = self._action("&Undo delete", "Ctrl+Z", self.undo_delete)
 
     def _scene_box(self):
@@ -239,7 +239,7 @@ class MainWindow(QMainWindow):
         self.pick_button.setToolTip("Select Gaussians in the object preview to delete (S)")
         self.pick_button.clicked.connect(self.set_selecting)
         self.delete_button = QPushButton("Delete")
-        self.delete_button.setToolTip("Delete the selected Gaussians (Delete)")
+        self.delete_button.setToolTip("Delete the selected Gaussians (Delete or X)")
         self.delete_button.clicked.connect(self.delete_selection)
         self.undo_delete_button = QPushButton("Undo")
         self.undo_delete_button.setToolTip("Undo the last delete (Ctrl+Z)")
@@ -437,7 +437,7 @@ class MainWindow(QMainWindow):
         if view.active is not None:
             picked = 0 if self._picked is None else int(self._picked.sum())
             text = "Show the Scene to mark more views"
-            self.pick_label.setText(f"{picked:,} selected. Delete removes them" if picked else
+            self.pick_label.setText(f"{picked:,} selected. Press X to delete them" if picked else
                                     "Drag a box or click to select strays" if view.selecting else "")
         elif not view.points:
             text = "Click the object" if view.selecting else "Press S to mark the object"
@@ -752,7 +752,7 @@ class MainWindow(QMainWindow):
         before = np.zeros(len(hit), bool) if self._picked is None or mode == 0 else self._picked
         self.set_picked(before | hit if mode != 2 else before & ~hit)
         count = 0 if self._picked is None else int(self._picked.sum())
-        self.statusBar().showMessage(f"{count:,} Gaussians selected. Press Delete to remove them" if count
+        self.statusBar().showMessage(f"{count:,} Gaussians selected. Press X to delete them" if count
                                      else "Nothing selected there")
 
     def delete_selection(self):
