@@ -185,7 +185,7 @@ def test_extract_cleans_hidden_fragments_previews_and_exports_full_gaussians(app
     np.testing.assert_array_equal(window.stages["selected"], SELECTED)
     np.testing.assert_array_equal(window.stages["cleaned"], CLEANED)
     assert renderer.lift_threads and all(t != threading.get_ident() for t in renderer.lift_threads)
-    assert "Removed: 1" in window.result_label.text()
+    assert "1 removed" in window.result_label.text()
     assert window.preview_box.currentText() == "Object only"
     assert window.export_action.isEnabled() and window.select_action.isEnabled()
     window.set_selecting(True)  # in the object preview this selects Gaussians; it does not mark a view
@@ -747,19 +747,19 @@ def test_selecting_marks_gaussians_and_only_deleting_removes_them(app, make_wind
     np.testing.assert_array_equal(window.stages["cleaned"], CLEANED)  # selected, not gone
     assert window.delete_action.isEnabled() and window.viewport.highlight.shape == (1, 3)
     np.testing.assert_allclose(window.viewport.highlight[0], window.object_scene.means[0])
-    assert "1 Gaussians selected" in window.prompt_label.text()
+    assert "1 selected" in window.pick_label.text()
     window.delete_selection()
     np.testing.assert_array_equal(window.stages["cleaned"], [False, True, False, False, False])
     assert len(window.object_scene) == 1 and window.viewport.renderer.n == 1
     assert window.viewport.selecting  # selecting goes on until the user leaves it
     assert window.viewport.highlight is None and not window.delete_action.isEnabled()
-    assert window.undo_delete_action.isEnabled() and "Deleted by hand: 1" in window.result_label.text()
+    assert window.undo_delete_action.isEnabled() and "1 deleted by hand" in window.result_label.text()
     window.viewport.render_now()
     assert export_object(app, window, tmp_path / "deleted.ply")
     assert len(load_ply(tmp_path / "deleted.ply")) == 1
     window.undo_delete()
     np.testing.assert_array_equal(window.stages["cleaned"], CLEANED)
-    assert len(window.object_scene) == 2 and "Deleted by hand" not in window.result_label.text()
+    assert len(window.object_scene) == 2 and "deleted by hand" not in window.result_label.text()
 
 
 def test_shift_adds_ctrl_takes_away_and_a_plain_drag_replaces(app, make_window):

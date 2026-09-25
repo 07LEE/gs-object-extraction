@@ -4,9 +4,9 @@ from pathlib import Path
 import numpy as np
 from PySide6.QtCore import QSignalBlocker, Qt
 from PySide6.QtGui import QAction, QKeySequence
-from PySide6.QtWidgets import (QComboBox, QDockWidget, QDoubleSpinBox, QFileDialog, QFormLayout,
+from PySide6.QtWidgets import (QComboBox, QDockWidget, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame,
                                QGroupBox, QHBoxLayout, QLabel, QListWidget, QMainWindow, QMessageBox, QProgressBar, QPushButton,
-                               QScrollArea, QToolButton, QVBoxLayout, QWidget)
+                               QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
 from ..extract import OFF_MASK, TRIM, trim_scales
 from .autoviews import AutoMarkJob, VIEWS
 from .pick import inside_box
@@ -16,8 +16,10 @@ from .loading import SceneLoadJob, SegmenterLoadJob
 from .orbit import AXES, DEFAULT_UP, Orbit
 from .segmenter import DEFAULT_CHECKPOINT, Segmenter
 from .viewport import BACKGROUND, Viewport
+from .widgets import Collapsible, Segmented
 from .views import MaskedView
 
+ON_STYLE = "QPushButton:checked { background: palette(highlight); color: palette(highlighted-text); }"
 TITLE = "3D Gaussian Splatting Object Extraction"
 NAVIGATE_HINT = "Left drag: orbit   Right drag: pan   Wheel: zoom   Double-click: rotation centre   S: select"
 SELECT_HINT = ("Left click: object point   Right click: background point   Backspace: undo   Esc: clear   "
@@ -68,16 +70,24 @@ class MainWindow(QMainWindow):
         column = QVBoxLayout(panel)
         self.scene_box = self._scene_box()
         column.addWidget(self.scene_box)
-        column.addWidget(self._object_box())
-        column.addWidget(self._extraction_box())
+        column.addWidget(self._mark_box())
+        column.addWidget(self._extract_box())
+        column.addWidget(self._clean_box())
         column.addStretch()
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setFrameShape(QFrame.NoFrame)
         scroll.setWidget(panel)
+        side = QWidget()
+        rows = QVBoxLayout(side)
+        rows.setContentsMargins(0, 0, 0, 0)
+        rows.setSpacing(0)
+        rows.addWidget(scroll, 1)
+        rows.addWidget(self._footer())
         dock = QDockWidget("Scene", self)
-        dock.setMinimumWidth(300)
-        dock.setWidget(scroll)
+        dock.setMinimumWidth(320)
+        dock.setWidget(side)
         dock.setFeatures(QDockWidget.NoDockWidgetFeatures)
         dock.setTitleBarWidget(QWidget())  # the panel's first group already says Scene
         self.addDockWidget(Qt.RightDockWidgetArea, dock)
@@ -117,33 +127,42 @@ class MainWindow(QMainWindow):
         self.undo_delete_action = self._action("&Undo delete", "Ctrl+Z", self.undo_delete)
 
     def _scene_box(self):
-        box = QGroupBox("Scene")
-        form = QFormLayout(box)
+        """The open file and the way up, on two thin lines."""
+        box = QWidget()
+        column = QVBoxLayout(box)
+        column.setContentsMargins(0, 0, 0, 0)
         self.file_label = QLabel("-")
+        self.file_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)  # a long name is cut, not a wider panel
+        self.file_label.setStyleSheet("font-weight: bold;")
         self.count_label = QLabel("-")
         self.up_box = QComboBox()
         self.up_box.addItems(["Auto", *AXES])
         self.up_box.currentTextChanged.connect(self.set_up)
         reset = QPushButton("Reset view")
         reset.clicked.connect(self.reset_view)
+        title = QHBoxLayout()
+        title.addWidget(self.file_label, 1)
+        title.addWidget(self.count_label)
+        title.addWidget(QLabel("Gaussians"))
         up = QHBoxLayout()
+        up.addWidget(QLabel("Up axis"))
         up.addWidget(self.up_box, 1)
         up.addWidget(reset)
-        form.addRow("File", self.file_label)
-        form.addRow("Gaussians", self.count_label)
-        form.addRow("Up axis", up)
+        column.addLayout(title)
+        column.addLayout(up)
         return box
 
-    def _object_box(self):
-        box = QGroupBox("Object")
+    def _mark_box(self):
+        box = QGroupBox("1  Mark views")
         column = QVBoxLayout(box)
-        select = QToolButton()
-        select.setDefaultAction(self.select_action)
-        select.setToolButtonStyle(Qt.ToolButtonTextOnly)
-        select.setStyleSheet("QToolButton:checked { background: palette(highlight); color: palette(highlighted-text); }")
+        self.mark_button = QPushButton("Select mode")
+        self.mark_button.setCheckable(True)
+        self.mark_button.setStyleSheet(ON_STYLE)
+        self.mark_button.setToolTip("Click the object to mask it (S)")
+        self.mark_button.clicked.connect(self.set_selecting)
         self.prompt_label = QLabel()
         self.prompt_label.setWordWrap(True)
-        self.prompt_label.setMinimumHeight(3 * self.prompt_label.fontMetrics().height())  # room for the mask line
+        self.prompt_label.setMinimumHeight(2 * self.prompt_label.fontMetrics().height())  # room for the mask line
         self.add_button = QPushButton("Add view")
         self.add_button.clicked.connect(self.add_view)
         self.bigger_button = QPushButton("Take the bigger mask")
@@ -152,48 +171,43 @@ class MainWindow(QMainWindow):
         self.bigger_button.clicked.connect(self.take_bigger)
         self.bigger_button.hide()
         self.view_list = QListWidget()
-        self.view_list.setMaximumHeight(4 * self.view_list.fontMetrics().height() + 12)  # the panel below has to stay in reach
+        self.view_list.setMaximumHeight(4 * self.view_list.fontMetrics().height() + 12)
         self.view_list.currentRowChanged.connect(self.update_extraction_state)
         self.view_list.currentRowChanged.connect(self.review_view)
         self.view_list.itemClicked.connect(lambda item: self.review_view(self.view_list.row(item)))
         self.remove_button = QPushButton("Remove view")
+        self.remove_button.setToolTip("Remove the view chosen in the list")
         self.remove_button.clicked.connect(self.remove_view)
-        self.auto_button = QPushButton("Mark around the object (experimental)")
+        self.auto_button = QPushButton("Mark around (experimental)")
         self.auto_button.setToolTip("Mark one view first, then this marks a ring of views from it. "
                                     "Check the result: pressing it again keeps what is marked and adds another ring")
         self.auto_button.clicked.connect(self.start_auto_mark)
         marking = QHBoxLayout()
-        marking.addWidget(select)
+        marking.addWidget(self.mark_button)
         marking.addWidget(self.add_button, 1)
+        managing = QHBoxLayout()
+        managing.addWidget(self.remove_button, 1)
+        managing.addWidget(self.auto_button, 1)
         column.addLayout(marking)
-        for widget in (self.prompt_label, self.bigger_button, QLabel("Views"),
-                       self.view_list, self.remove_button, self.auto_button):
-            column.addWidget(widget)
+        column.addWidget(self.prompt_label)
+        column.addWidget(self.bigger_button)
+        column.addWidget(self.view_list)
+        column.addLayout(managing)
         return box
 
-    def _extraction_box(self):
-        box = QGroupBox("Extraction")
-        column = QFormLayout(box)
+    def _extract_box(self):
+        box = QGroupBox("2  Extract")
+        column = QVBoxLayout(box)
         self.extract_button = QPushButton("Extract object")
+        self.extract_button.setStyleSheet("font-weight: bold;")
         self.extract_button.clicked.connect(self.start_extraction)
+        self.result_label = QLabel("Add views, then extract the object")
+        self.result_label.setWordWrap(True)
         self.off_threshold_box = QDoubleSpinBox()
         self.off_threshold_box.setRange(.05, .95)
         self.off_threshold_box.setSingleStep(.05)
         self.off_threshold_box.setValue(OFF_MASK)
         self.off_threshold_box.setToolTip("Lower removes more pieces that stray outside the mask, at the cost of thinner edges")
-        self.result_label = QLabel("Add views, then extract the object")
-        self.result_label.setWordWrap(True)
-        self.progress = QProgressBar()
-        self.progress.hide()
-        self.cancel_button = QPushButton("Cancel")
-        self.cancel_button.clicked.connect(self.cancel_job)
-        self.cancel_button.hide()
-        self.preview_box = QComboBox()
-        self.preview_box.addItems(["Scene", "Object only"])
-        self.preview_box.currentIndexChanged.connect(self.update_preview)
-        self.background_box = QComboBox()
-        self.background_box.addItems(["White", "Black"])
-        self.background_box.currentIndexChanged.connect(self.update_background)
         self.trim_box = QDoubleSpinBox()
         self.trim_box.setRange(.5, 1.)
         self.trim_box.setSingleStep(.05)
@@ -201,24 +215,66 @@ class MainWindow(QMainWindow):
         self.trim_box.setToolTip("Pulls in the Gaussians that reach past the masks, which is what haloes the object; "
                                  "1.00 leaves them as they are")
         self.trim_box.valueChanged.connect(self.update_trim)
-        self.export_button = QPushButton("Export object PLY...")
-        self.export_button.clicked.connect(self.choose_export)
-        column.addRow("Off-mask limit", self.off_threshold_box)
-        for widget in (self.extract_button, self.result_label, self.progress, self.cancel_button):
-            column.addRow(widget)
-        column.addRow("Preview", self.preview_box)
-        column.addRow("Background", self.background_box)
-        column.addRow("Edge trim", self.trim_box)
-        self.delete_button = QPushButton("Delete selection")
-        self.delete_button.clicked.connect(self.delete_selection)
-        self.undo_delete_button = QPushButton("Undo delete")
-        self.undo_delete_button.clicked.connect(self.undo_delete)
-        deleting = QHBoxLayout()
-        deleting.addWidget(self.delete_button, 1)
-        deleting.addWidget(self.undo_delete_button, 1)
-        column.addRow(deleting)
-        column.addRow(self.export_button)
+        advanced = Collapsible("Advanced")
+        form = QFormLayout(advanced.body())
+        form.setContentsMargins(0, 0, 0, 0)
+        form.addRow("Off-mask limit", self.off_threshold_box)
+        form.addRow("Edge trim", self.trim_box)
+        column.addWidget(self.extract_button)
+        column.addWidget(self.result_label)
+        column.addWidget(advanced)
         return box
+
+    def _clean_box(self):
+        box = QGroupBox("3  Clean up")
+        column = QFormLayout(box)
+        self.preview_box = Segmented(["Scene", "Object only"])
+        self.preview_box.currentIndexChanged.connect(self.update_preview)
+        self.background_box = QComboBox()
+        self.background_box.addItems(["White", "Black"])
+        self.background_box.currentIndexChanged.connect(self.update_background)
+        self.pick_button = QPushButton("Select")
+        self.pick_button.setCheckable(True)
+        self.pick_button.setStyleSheet(ON_STYLE)
+        self.pick_button.setToolTip("Select Gaussians in the object preview to delete (S)")
+        self.pick_button.clicked.connect(self.set_selecting)
+        self.delete_button = QPushButton("Delete")
+        self.delete_button.setToolTip("Delete the selected Gaussians (Delete)")
+        self.delete_button.clicked.connect(self.delete_selection)
+        self.undo_delete_button = QPushButton("Undo")
+        self.undo_delete_button.setToolTip("Undo the last delete (Ctrl+Z)")
+        self.undo_delete_button.clicked.connect(self.undo_delete)
+        self.pick_label = QLabel()
+        self.pick_label.setWordWrap(True)
+        self.pick_label.setMinimumHeight(self.pick_label.fontMetrics().height())
+        strays = QHBoxLayout()
+        for button in (self.pick_button, self.delete_button, self.undo_delete_button):
+            strays.addWidget(button, 1)
+        column.addRow("Show", self.preview_box)
+        column.addRow("Background", self.background_box)
+        column.addRow(strays)
+        column.addRow(self.pick_label)
+        return box
+
+    def _footer(self):
+        """What must stay in reach whatever the panel is scrolled to: progress, cancel and export."""
+        footer = QWidget()
+        column = QVBoxLayout(footer)
+        column.setContentsMargins(8, 4, 8, 8)
+        self.progress = QProgressBar()
+        self.progress.hide()
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.clicked.connect(self.cancel_job)
+        self.cancel_button.hide()
+        self.export_button = QPushButton("Export object PLY...")
+        self.export_button.setStyleSheet("font-weight: bold;")
+        self.export_button.clicked.connect(self.choose_export)
+        working = QHBoxLayout()
+        working.addWidget(self.progress, 1)
+        working.addWidget(self.cancel_button)
+        column.addLayout(working)
+        column.addWidget(self.export_button)
+        return footer
 
     def choose_ply(self):
         path, _ = QFileDialog.getOpenFileName(self, "Open Gaussian PLY", "", "PLY files (*.ply)")
@@ -347,6 +403,7 @@ class MainWindow(QMainWindow):
     def set_selecting(self, on):
         self.viewport.set_selecting(on)
         self.select_action.setChecked(self.viewport.selecting)
+        self.sync_select_buttons()
         self.update_hint()
         self.update_prompt_state()
         if self.viewport.selecting and self.viewport.active is None:
@@ -376,11 +433,12 @@ class MainWindow(QMainWindow):
 
     def update_prompt_state(self):
         view = self.viewport
+        self.pick_label.setText("")
         if view.active is not None:
             picked = 0 if self._picked is None else int(self._picked.sum())
-            text = (f"{picked:,} Gaussians selected. Delete removes them" if picked else
-                    "Drag a box or click to select Gaussians to delete" if view.selecting else
-                    "Press S to select Gaussians to delete, or choose Scene in Preview to mark more views")
+            text = "Show the Scene to mark more views"
+            self.pick_label.setText(f"{picked:,} selected. Delete removes them" if picked else
+                                    "Drag a box or click to select strays" if view.selecting else "")
         elif not view.points:
             text = "Click the object" if view.selecting else "Press S to mark the object"
         else:
@@ -464,6 +522,7 @@ class MainWindow(QMainWindow):
         self.select_action.setEnabled(not busy)
         self.clear_action.setEnabled(not busy)
         self.undo_action.setEnabled(not busy and not preview)
+        self.sync_select_buttons()
         self.update_prompt_state()
 
     def invalidate_result(self):
@@ -653,9 +712,18 @@ class MainWindow(QMainWindow):
         if not cleaned:
             self.result_label.setText("No object Gaussians remain. Add or revise the marked views and extract again.")
             return
-        text = f"Selected: {selected:,}\nRemoved: {selected - int(self._extracted.sum()):,}\nObject: {cleaned:,} Gaussians"
-        deleted = int(self._extracted.sum()) - cleaned
-        self.result_label.setText(text + (f"\nDeleted by hand: {deleted:,}" if deleted else ""))
+        extracted = int(self._extracted.sum())
+        text = f"{cleaned:,} Gaussians kept · {selected - extracted:,} removed"
+        self.result_label.setText(text + (f" · {extracted - cleaned:,} deleted by hand" if extracted != cleaned else ""))
+
+    def sync_select_buttons(self):
+        """The scene is marked with one button and the object's Gaussians selected with another; only the right one is live."""
+        preview = self.viewport.active is not None
+        on, ready = self.viewport.selecting, self.select_action.isEnabled()
+        self.mark_button.setEnabled(ready and not preview)
+        self.mark_button.setChecked(on and not preview)
+        self.pick_button.setEnabled(ready and preview)
+        self.pick_button.setChecked(on and preview)
 
     def update_hint(self):
         preview = self.viewport.active is not None

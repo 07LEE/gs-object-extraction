@@ -63,8 +63,8 @@ gs-object-extraction-gui
 Most of the panel says what it does, and the app carries tooltips. Three controls are worth knowing in advance, because they change the object you get:
 
 - **Mark around the object (experimental)** (*Object*) needs one marked view to start from, then marks a ring of views around the object on its own. Review the result and press it again to add another ring; each run keeps what is already marked.
-- **Off-mask limit** (*Extraction*) is read when extraction starts. Lower drops more Gaussians that stray outside the masks, at the cost of thinner edges. Changing it means extracting again.
-- **Edge trim** (*Extraction*) pulls in the Gaussians that reach past the masks and halo the object; `1.00` leaves them as they are. It applies to a finished object without re-extracting, and changes what is exported, not just the preview.
+- **Off-mask limit** (*Extract*, under *Advanced*) is read when extraction starts. Lower drops more Gaussians that stray outside the masks, at the cost of thinner edges. Changing it means extracting again.
+- **Edge trim** (*Extract*, under *Advanced*) pulls in the Gaussians that reach past the masks and halo the object; `1.00` leaves them as they are. It applies to a finished object without re-extracting, and changes what is exported, not just the preview.
 
 Surfaces missing from the source scene cannot be recovered. An object photographed from one side stays hollow on the other, and thin structures such as leaves may lose detail at the edges.
 
