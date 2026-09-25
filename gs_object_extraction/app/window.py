@@ -79,7 +79,6 @@ class MainWindow(QMainWindow):
         self.scene_box = self._scene_box()
         column.addWidget(self.scene_box)
         column.addWidget(self._mark_box())
-        column.addWidget(self._extract_box())
         column.addWidget(self._clean_box())
         column.addStretch()
         scroll = QScrollArea()
@@ -168,7 +167,7 @@ class MainWindow(QMainWindow):
         return box
 
     def _mark_box(self):
-        box = QGroupBox("1  Mark views")
+        box = QGroupBox("Object")
         column = QVBoxLayout(box)
         self.mark_button = QPushButton("Select mode")
         self.mark_button.setCheckable(True)
@@ -203,16 +202,6 @@ class MainWindow(QMainWindow):
         managing = QHBoxLayout()
         managing.addWidget(self.remove_button, 1)
         managing.addWidget(self.auto_button, 1)
-        column.addLayout(marking)
-        column.addWidget(self.prompt_label)
-        column.addWidget(self.bigger_button)
-        column.addWidget(self.view_list)
-        column.addLayout(managing)
-        return box
-
-    def _extract_box(self):
-        box = QGroupBox("2  Extract")
-        column = QVBoxLayout(box)
         self.extract_button = QPushButton("Extract object")
         self.extract_button.setStyleSheet("font-weight: bold;")
         self.extract_button.clicked.connect(self.start_extraction)
@@ -235,14 +224,19 @@ class MainWindow(QMainWindow):
         form.setContentsMargins(0, 0, 0, 0)
         form.addRow("Off-mask limit", self.off_threshold_box)
         form.addRow("Edge trim", self.trim_box)
-        column.addWidget(self.extract_button)
+        column.addLayout(marking)
+        column.addWidget(self.prompt_label)
+        column.addWidget(self.bigger_button)
+        column.addWidget(self.view_list)
+        column.addLayout(managing)
+        column.addWidget(self.extract_button)  # straight under the views it works from
         column.addWidget(self.result_label)
         column.addWidget(advanced)
         return box
 
     def _clean_box(self):
         """What is left to do to the extracted object: take strays out by hand, and refit it so it stands solid."""
-        box = QGroupBox("3  Clean up")
+        box = QGroupBox("Clean up")
         column = QFormLayout(box)
         self.pick_button = QPushButton("Select")
         self.pick_button.setCheckable(True)
