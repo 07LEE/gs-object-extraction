@@ -13,7 +13,7 @@ were not confirmed.
 import time
 from dataclasses import dataclass
 import numpy as np
-from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QApplication, QLabel, QToolButton, QWidget
 from .orbit import unproject
@@ -40,6 +40,13 @@ OUTLINE_RGBA = (255, 255, 255, 230)
 OUTLINE = 2  # pixels
 PARTIAL = 2.  # a candidate this much larger than the mask means the click probably caught a part
 POINT_COLORS = {1: QColor(60, 220, 90), 0: QColor(235, 60, 60)}
+FLY_KEYS = {  # (ahead, aside, rise): W A S D walk, Q E go down and up, as in Isaac Sim; the arrow keys and Page Up / Down do the same
+    Qt.Key_W: (1, 0, 0), Qt.Key_S: (-1, 0, 0), Qt.Key_D: (0, 1, 0), Qt.Key_A: (0, -1, 0), Qt.Key_E: (0, 0, 1), Qt.Key_Q: (0, 0, -1),
+    Qt.Key_Up: (1, 0, 0), Qt.Key_Down: (-1, 0, 0), Qt.Key_Right: (0, 1, 0), Qt.Key_Left: (0, -1, 0),
+    Qt.Key_PageUp: (0, 0, 1), Qt.Key_PageDown: (0, 0, -1)}
+FLY_SPEED = .8  # distances to the orbit centre covered in a second
+FLY_FAST = 3.  # ... with Shift held
+FLY_TICK_MS = 16
 SETTLE_MS = 250  # the camera has to rest this long before the marks are worked out again on the new frame
 OCCLUDED = .12  # a mark is hidden when what is drawn there lies this much nearer than the mark, in relative depth
 
@@ -182,6 +189,13 @@ class Viewport(QWidget):
         self.editing = None  # the marked view whose points and mask are being corrected; the prompts on screen are its own plus the new ones
         self._press = None
         self._dragging = False
+        self._flying = False  # the right button is down: the keys walk the camera
+        self._fly_keys = set()
+        self._fly_fast = False
+        self._fly_clock = None
+        self._fly_timer = QTimer(self)
+        self._fly_timer.setInterval(FLY_TICK_MS)
+        self._fly_timer.timeout.connect(self._fly_tick)
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.setInterval(0)
@@ -663,20 +677,72 @@ class Viewport(QWidget):
         self._place_overlay()
         self.view_changed(keep_prompts=True)
 
+    def event(self, event):
+        # S selects and X deletes, as window shortcuts; with the right button down the keys are for walking, and the view takes them.
+        if event.type() == QEvent.ShortcutOverride and self._flying and event.key() in FLY_KEYS:
+            event.accept()
+            return True
+        return super().event(event)
+
     def keyPressEvent(self, event):
         """Space adds the view whose mask is on screen, right where the clicks were made.
 
         This is the view's own key rather than a window shortcut on purpose: as a shortcut it would
         also reach a panel button that still has the focus from an earlier click.
+        With the right button down, W A S D Q E (or the arrows, Page Up and Down) walk the camera.
         """
+        if self._flying and event.key() in FLY_KEYS:
+            if not event.isAutoRepeat():
+                self._fly_keys.add(event.key())
+                self._fly_fast = bool(event.modifiers() & Qt.ShiftModifier)
+                if not self._fly_timer.isActive():
+                    self._fly_clock = time.perf_counter()
+                    self._fly_timer.start()
+            return
         if event.key() == Qt.Key_Space and not event.modifiers() and not event.isAutoRepeat():
             self.add_requested.emit()
             return
         super().keyPressEvent(event)
 
+    def keyReleaseEvent(self, event):
+        if event.key() in FLY_KEYS and not event.isAutoRepeat():
+            self._fly_keys.discard(event.key())
+            if not self._fly_keys:
+                self._fly_timer.stop()
+            return
+        super().keyReleaseEvent(event)
+
+    def focusOutEvent(self, event):
+        self._stop_flying()  # a key let go while another window had the focus would never be seen to be
+        super().focusOutEvent(event)
+
+    def _stop_flying(self):
+        self._flying = False
+        self._fly_keys.clear()
+        self._fly_timer.stop()
+
+    def _fly_tick(self, seconds=None):
+        """Walk the camera for ``seconds`` (the time since the last tick) in the directions of the keys held."""
+        now = time.perf_counter()
+        if seconds is None:
+            seconds = min(now - (self._fly_clock or now), .1)  # a stall does not become a leap
+        self._fly_clock = now
+        if self.orbit is None or not self._fly_keys:
+            return
+        ahead, aside, rise = (sum(FLY_KEYS[k][i] for k in self._fly_keys) for i in range(3))
+        if not (ahead or aside or rise):
+            return
+        step = seconds * FLY_SPEED * self.orbit.distance * (FLY_FAST if self._fly_fast else 1.)
+        self.orbit.walk(ahead * step, aside * step, rise * step)
+        self._dragging = True  # the button was held to fly: letting go of it is not a click
+        self.view_changed(keep_prompts=True)
+
     def mousePressEvent(self, event):
         self._press = (event.button(), event.position(), event.position(), bool(event.modifiers() & Qt.AltModifier))
         self._dragging = False
+        if event.button() == Qt.RightButton and not event.modifiers() & Qt.AltModifier and self.orbit is not None:
+            self._flying = True  # the keys walk the camera for as long as the button is held
+            self.setFocus()
 
     def mouseMoveEvent(self, event):
         if self._press is None or self.orbit is None:
@@ -705,6 +771,8 @@ class Viewport(QWidget):
 
     def mouseReleaseEvent(self, event):
         press, self._press = self._press, None
+        if press is not None and press[0] == Qt.RightButton:
+            self._stop_flying()
         if press is None or press[3] or press[0] == Qt.MiddleButton:  # Alt or the middle button: the camera's, never a click
             return
         if press[0] == Qt.LeftButton and self.selecting and self.active is not None and self.camera is not None:

@@ -95,6 +95,16 @@ class Orbit:
         self.pitch = float(np.clip(self.pitch + dy * speed, -PITCH_LIMIT, PITCH_LIMIT))
         self.target = eye - self.distance * self._direction()
 
+    def walk(self, ahead, aside, rise):
+        """Move the camera by ``ahead`` along where it looks, ``aside`` to its right and ``rise`` up, turning nothing.
+
+        The orbit centre goes with it, so the distance to it and the way the camera faces stay as they were.
+        """
+        forward = -self._direction()
+        right = np.cross(forward, self.up)
+        right /= np.linalg.norm(right)
+        self.target = self.target + forward * ahead + right * aside + self.up * rise
+
     def pan(self, dx, dy, height):
         """Drag by (dx, dy) pixels: points at the target's depth follow the mouse exactly."""
         rows = self.camera(max(int(height), 1), max(int(height), 1)).world_to_camera[:3, :3]

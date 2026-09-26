@@ -22,8 +22,8 @@ from .views import MaskedView
 
 ON_STYLE = "QPushButton:checked { background: palette(highlight); color: palette(highlighted-text); }"
 TITLE = "3D Gaussian Splatting Object Extraction"
-NAVIGATE_HINT = ("Alt + left drag: orbit   Middle drag: pan   Right drag: look   Alt + right drag or wheel: zoom   "
-                 "Double-click: rotation centre   S: select")
+NAVIGATE_HINT = ("Alt + left drag: orbit   Middle drag: pan   Right drag: look   Right drag + WASD QE: fly   "
+                 "Alt + right drag or wheel: zoom   Double-click: rotation centre   S: select")
 SELECT_HINT = ("Left click: object point   Right click: background point   Backspace: undo   Esc: clear   "
                "Enter or Space: add view   S: navigate")
 PREVIEW_HINT = ("Object preview   Alt + left drag: orbit   Middle drag: pan   Right drag: look   Alt + right drag or wheel: zoom   "

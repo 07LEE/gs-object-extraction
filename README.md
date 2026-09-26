@@ -49,6 +49,7 @@ The camera moves as in Isaac Sim.
 | Input | Action |
 | --- | --- |
 | Alt + left drag / middle drag / right drag | Orbit / pan / look around |
+| Right drag held + W A S D, Q E | Fly: forward, left, back, right, down, up (Shift: faster; the arrows and Page Up / Down work too) |
 | Alt + right drag, wheel | Zoom |
 | Double-click | Rotation centre under the cursor |
 | S, Enter or Space, Backspace, Esc | Select mode, add view, undo point, clear points or selection |

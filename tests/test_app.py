@@ -1041,3 +1041,123 @@ def test_esc_clears_what_was_just_added_from_the_screen_but_not_from_the_views(a
     assert view.points == [(200, 150)] and view.kept
     window.clear_action.trigger()  # Esc
     assert view.points == [] and view.mask is None and not view.kept and len(window.views) == 1
+
+
+def fly_window():
+    window, view = ready_window(FakeSegmenter())
+    view.set_scene(FlakyRenderer(), Orbit(np.zeros(3), 6., pitch=np.deg2rad(20.)))
+    view.render_now()
+    return window, view
+
+
+def press_right(view):
+    view.mousePressEvent(mouse(QEvent.MouseButtonPress, 100, 80, Qt.RightButton))
+
+
+def release_right(view):
+    view.mouseReleaseEvent(mouse(QEvent.MouseButtonRelease, 100, 80, Qt.RightButton))
+
+
+def test_wasd_qe_walk_the_camera_only_while_the_right_button_is_down():
+    from PySide6.QtTest import QTest
+    window, view = fly_window()
+    eye = view.orbit.eye.copy()
+    forward = view.camera.world_to_camera[2, :3].copy()
+    right = view.camera.world_to_camera[0, :3].copy()
+    QTest.keyPress(view, Qt.Key_W)  # the right button is not down: nothing
+    view._fly_tick(.5)
+    assert np.allclose(view.orbit.eye, eye) and not view._fly_keys
+    press_right(view)
+    QTest.keyPress(view, Qt.Key_W)
+    view._fly_tick(.5)
+    step = .5 * 0.8 * 6.  # half a second at FLY_SPEED distances to the orbit centre per second
+    np.testing.assert_allclose(view.orbit.eye - eye, step * forward, atol=1e-9)  # W: ahead
+    QTest.keyRelease(view, Qt.Key_W)
+    QTest.keyPress(view, Qt.Key_D)
+    view._fly_tick(.5)
+    np.testing.assert_allclose(view.orbit.eye - eye - step * forward, step * right, atol=1e-9)  # D: to the right
+    QTest.keyRelease(view, Qt.Key_D)
+    before = view.orbit.eye.copy()
+    QTest.keyPress(view, Qt.Key_E)
+    view._fly_tick(.5)
+    QTest.keyPress(view, Qt.Key_Q)  # E and Q together cancel
+    view._fly_tick(.5)
+    assert abs((view.orbit.eye - before)[np.argmax(np.abs(view.orbit.up))]) < step * 1.01
+    release_right(view)
+    assert not view._flying and not view._fly_keys and not view._fly_timer.isActive()  # letting go stops it
+    QTest.keyPress(view, Qt.Key_W)
+    view._fly_tick(.5)
+    assert not view._fly_keys
+
+
+def test_s_walks_back_while_flying_instead_of_switching_select_mode():
+    from PySide6.QtCore import QEvent
+    from PySide6.QtGui import QKeyEvent
+    from PySide6.QtTest import QTest
+    window, view = fly_window()
+    view.setFocus()
+    eye = view.orbit.eye.copy()
+    forward = view.camera.world_to_camera[2, :3].copy()
+    press_right(view)
+    override = QKeyEvent(QEvent.ShortcutOverride, Qt.Key_S, Qt.NoModifier, "s")
+    override.ignore()
+    QApplication.sendEvent(QApplication.focusWidget(), override)  # what asks a widget whether it wants a key before a shortcut gets it
+    assert override.isAccepted()
+    QTest.keyPress(QApplication.focusWidget(), Qt.Key_S)  # the way a real key reaches the app: to the widget in focus
+    assert not view.selecting and not window.select_action.isChecked() and view._fly_keys == {Qt.Key_S}
+    view._fly_tick(.25)
+    np.testing.assert_allclose(view.orbit.eye - eye, -.25 * 0.8 * 6. * forward, atol=1e-9)  # S: back
+    QTest.keyRelease(QApplication.focusWidget(), Qt.Key_S)
+    release_right(view)
+    assert not view._flying
+    override = QKeyEvent(QEvent.ShortcutOverride, Qt.Key_S, Qt.NoModifier, "s")
+    override.ignore()
+    QApplication.sendEvent(QApplication.focusWidget(), override)  # the right button is up: the view lets S be the shortcut it always was
+    assert not override.isAccepted()
+    QTest.keyClick(QApplication.focusWidget(), Qt.Key_S)
+    assert window.select_action.isChecked() and view.selecting
+
+
+def test_shift_flies_faster_and_the_arrow_keys_do_the_same_as_wasd():
+    from PySide6.QtTest import QTest
+    window, view = fly_window()
+    eye = view.orbit.eye.copy()
+    press_right(view)
+    QTest.keyPress(view, Qt.Key_Up)
+    view._fly_tick(.5)
+    slow = np.linalg.norm(view.orbit.eye - eye)
+    QTest.keyRelease(view, Qt.Key_Up)
+    eye = view.orbit.eye.copy()
+    QTest.keyPress(view, Qt.Key_Up, Qt.ShiftModifier)
+    view._fly_tick(.5)
+    assert np.linalg.norm(view.orbit.eye - eye) == pytest.approx(3 * slow)
+    release_right(view)
+
+
+def test_a_right_click_still_marks_the_background_but_flying_with_it_held_is_not_a_click(app):
+    from PySide6.QtTest import QTest
+    fake = FakeSegmenter()
+    window, view, _ = ground_window()
+    click(view, 200, 150, Qt.LeftButton)
+    press_right(view)
+    QTest.keyPress(view, Qt.Key_W)
+    view._fly_tick(.1)
+    QTest.keyRelease(view, Qt.Key_W)
+    release_right(view)  # held to fly: releasing is not a click
+    assert view.labels == [1] or view.labels == []  # nothing new was marked
+    labels = list(view.labels)
+    view.render_now()
+    click(view, 260, 170, Qt.RightButton)  # a plain right click is still a background point
+    assert view.labels[-1] == 0 and len(view.labels) == len(labels) + 1
+
+
+def test_the_focus_being_lost_stops_a_walk_that_would_never_see_the_key_let_go():
+    from PySide6.QtGui import QFocusEvent
+    from PySide6.QtTest import QTest
+    window, view = fly_window()
+    press_right(view)
+    QTest.keyPress(view, Qt.Key_W)
+    assert view._fly_timer.isActive()
+    view.focusOutEvent(QFocusEvent(QEvent.FocusOut))
+    assert not view._flying and not view._fly_keys and not view._fly_timer.isActive()
+    release_right(view)
