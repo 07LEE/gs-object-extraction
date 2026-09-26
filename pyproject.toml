@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gs-object-extraction"
-version = "0.1.0"
+version = "0.2.0"
 description = "Cut clean standalone objects out of trained 3D Gaussian Splatting scenes"
 requires-python = ">=3.10"
 dependencies = ["numpy>=1.24"]
