@@ -25,7 +25,7 @@ TITLE = "3D Gaussian Splatting Object Extraction"
 NAVIGATE_HINT = ("Alt + left drag: orbit   Middle drag: pan   Right drag: look   Alt + right drag or wheel: zoom   "
                  "Double-click: rotation centre   S: select")
 SELECT_HINT = ("Left click: object point   Right click: background point   Backspace: undo   Esc: clear   "
-               "Enter: add view   S: navigate")
+               "Enter or Space: add view   S: navigate")
 PREVIEW_HINT = ("Object preview   Alt + left drag: orbit   Middle drag: pan   Right drag: look   Alt + right drag or wheel: zoom   "
                 "S: select Gaussians   Ctrl+Shift+S: export")
 PICK_HINT = ("Drag: select inside the box   Click: select around the point   Shift: add   Ctrl: take away   "
@@ -69,6 +69,7 @@ class MainWindow(QMainWindow):
         self.viewport.render_failed.connect(lambda message: self.statusBar().showMessage(f"Render failed: {message}"))
         self.viewport.prompts_changed.connect(self.update_prompt_state)
         self.viewport.select_requested.connect(self.pick_region)
+        self.viewport.add_requested.connect(self.add_view)
         self.preview_box = Choice(self.viewport.object_button, ("Scene", "Object only"))  # the two on-screen toggles, read like combo boxes
         self.preview_box.currentIndexChanged.connect(self.update_preview)
         self.background_box = Choice(self.viewport.background_button, ("White", "Black"))

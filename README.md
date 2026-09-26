@@ -35,7 +35,7 @@ gs-object-extraction-gui [scene.ply]
   <img alt="The viewer with one click on the object" src="docs/images/viewer-light.jpg">
 </picture>
 
-1. **Mark views.** Press **S**, click the object, and SAM2 overlays a mask (right-click what it wrongly includes). **Enter** adds the view. Mark about 16 from around the object, camera low; *Mark around* does the ring after one view. Click a view in the list to check it, *Remove view* to drop it.
+1. **Mark views.** Press **S**, click the object, and SAM2 overlays a mask (right-click what it wrongly includes). **Enter** or **Space** adds the view. Mark about 16 from around the object, camera low; *Mark around* does the ring after one view. Click a view in the list to check it, *Remove view* to drop it.
 2. **Extract.** **Ctrl+E**. The view switches to the object alone.
 3. **Clean up.** In the object preview, press **S** and drag a box or click to select strays (red); **X** or **Delete** removes them, **Ctrl+Z** undoes. *Refine* refits opacity, colour and size so the object stands solid; set *Edge trim* first. *Revert* undoes it.
 4. **Export.** **Ctrl+Shift+S**.
@@ -51,7 +51,7 @@ The camera moves as in Isaac Sim.
 | Alt + left drag / middle drag / right drag | Orbit / pan / look around |
 | Alt + right drag, wheel | Zoom |
 | Double-click | Rotation centre under the cursor |
-| S, Enter, Backspace, Esc | Select mode, add view, undo point, clear points or selection |
+| S, Enter or Space, Backspace, Esc | Select mode, add view, undo point, clear points or selection |
 | Shift, Ctrl while selecting | Add to, take away from the selection |
 | Ctrl+E, Ctrl+Shift+S | Extract, export |
 

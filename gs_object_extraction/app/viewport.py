@@ -108,6 +108,7 @@ class Viewport(QWidget):
     render_failed = Signal(str)
     prompts_changed = Signal()
     failed = Signal(str)
+    add_requested = Signal()  # Space over the view: the mask on screen is the one to keep
     select_requested = Signal(float, float, float, float, int)  # a box in the frame's own pixels; 0 replaces, 1 adds to, 2 takes from the selection
 
     def __init__(self, parent=None):
@@ -524,6 +525,17 @@ class Viewport(QWidget):
     def resizeEvent(self, event):
         self._place_overlay()
         self.view_changed()
+
+    def keyPressEvent(self, event):
+        """Space adds the view whose mask is on screen, right where the clicks were made.
+
+        This is the view's own key rather than a window shortcut on purpose: as a shortcut it would
+        also reach a panel button that still has the focus from an earlier click.
+        """
+        if event.key() == Qt.Key_Space and not event.modifiers() and not event.isAutoRepeat():
+            self.add_requested.emit()
+            return
+        super().keyPressEvent(event)
 
     def mousePressEvent(self, event):
         self._press = (event.button(), event.position(), event.position(), bool(event.modifiers() & Qt.AltModifier))

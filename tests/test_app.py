@@ -735,3 +735,36 @@ def test_a_right_click_still_marks_the_background_and_a_right_drag_looks_instead
     drag(view, (200, 150), (260, 120), Qt.RightButton)  # a drag: the camera looks around, and marks nothing
     assert np.allclose(view.orbit.eye, eye) and not np.allclose(view.orbit.target, target)
     assert len(fake.calls) == calls and view.labels == []  # the view moved, so the unconfirmed points went, as with any camera move
+
+
+def test_space_over_the_view_adds_the_marked_view_like_enter(app):
+    from PySide6.QtTest import QTest
+    window, view = ready_window(FakeSegmenter())
+    window.select_action.trigger()
+    QTest.keyClick(view, Qt.Key_Space)  # nothing marked yet: nothing to add
+    assert window.views == []
+    click(view, 100, 80, Qt.LeftButton)
+    QTest.keyClick(view, Qt.Key_Space)
+    assert len(window.views) == 1 and window.views[0].mask[80, 100] and view.points == []
+    QTest.keyClick(view, Qt.Key_Space)  # the marks went with the view: a second Space adds nothing
+    assert len(window.views) == 1
+    click(view, 100, 80, Qt.LeftButton)
+    QTest.keyClick(view, Qt.Key_Space, Qt.ShiftModifier)  # only a bare Space
+    assert len(window.views) == 1
+    QTest.keyClick(view, Qt.Key_Return)  # Enter still works
+    assert len(window.views) == 2
+
+
+def test_space_does_not_reach_a_panel_button_that_kept_the_focus(app):
+    from PySide6.QtTest import QTest
+    window, view = ready_window(FakeSegmenter())
+    window.select_action.trigger()
+    click(view, 100, 80, Qt.LeftButton)  # a mask is on screen and could be added
+    assert window.add_button.isEnabled()
+    pressed = []
+    window.remove_button.setEnabled(True)
+    window.remove_button.clicked.connect(lambda: pressed.append(True))
+    QTest.keyClick(window.remove_button, Qt.Key_Space)  # a Space that goes to a panel button
+    assert pressed == [True] and window.views == []  # the button took it; the view was not added
+    QTest.keyClick(view, Qt.Key_Space)  # a Space that goes to the view
+    assert len(window.views) == 1
