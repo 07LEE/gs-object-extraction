@@ -11,6 +11,7 @@ were not confirmed.
 """
 
 import time
+from dataclasses import dataclass
 import numpy as np
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPen, QPixmap
@@ -39,6 +40,21 @@ OUTLINE_RGBA = (255, 255, 255, 230)
 OUTLINE = 2  # pixels
 PARTIAL = 2.  # a candidate this much larger than the mask means the click probably caught a part
 POINT_COLORS = {1: QColor(60, 220, 90), 0: QColor(235, 60, 60)}
+SETTLE_MS = 250  # the camera has to rest this long before the marks are worked out again on the new frame
+OCCLUDED = .12  # a mark is hidden when what is drawn there lies this much nearer than the mark, in relative depth
+
+
+@dataclass
+class Anchor:
+    """One click, held where it hit the surface, so it survives the camera moving.
+
+    ``world`` is None where the click hit nothing solid: such a mark exists only on the frame it was made on.
+    ``pixel`` is where it is on the frame on screen, or None while something hides it.
+    """
+
+    world: object
+    label: int
+    pixel: object
 
 
 def _mask_image(mask):
@@ -152,7 +168,13 @@ class Viewport(QWidget):
         self.pixels = None  # uint8 RGB of the frame on screen
         self.camera = None  # camera of the frame on screen
         self.frame = 0  # increments with every rendered frame; keys the SAM2 embedding
-        self.points, self.labels = [], []
+        self.points, self.labels = [], []  # the marks on the frame on screen, as pixels: those of the anchors that can be seen
+        self._anchors = []  # every mark, held on the surface it hit
+        self._keep_prompts = False  # the camera moved: the anchors go onto the next frame instead of being dropped
+        self._settle_timer = QTimer(self)
+        self._settle_timer.setSingleShot(True)
+        self._settle_timer.setInterval(SETTLE_MS)
+        self._settle_timer.timeout.connect(self._settle)
         self.mask = self.score = self._overlay = None
         self.bigger = self.bigger_score = None  # a larger mask SAM2 offered for the same click
         self.reviewing = None  # (MaskedView, its overlay) while a marked view is shown; moving the view ends it
@@ -239,11 +261,91 @@ class Viewport(QWidget):
         """Render on the next event-loop turn; repeated requests collapse into one frame."""
         self._timer.start(delay)
 
-    def view_changed(self):
-        """The camera or the widget size changed: prompts on the old frame no longer apply."""
+    def view_changed(self, keep_prompts=False):
+        """The camera or the widget size changed: the frame is drawn again.
+
+        Marks on the old frame no longer sit where they did, so they are dropped, unless the camera
+        merely moved (``keep_prompts``) and they were held on the surface: they are then put back on
+        the new frame, and the mask is worked out again once the camera has come to rest.
+        """
         self.pixels = self.camera = self.reviewing = None
-        self.clear_prompts()
+        self._keep_prompts = keep_prompts and any(a.world is not None for a in self._anchors)
+        if self._keep_prompts:
+            self.editing = None  # what is marked now belongs to a camera of its own, not to the view that was being corrected
+            self.mask = self.score = self._overlay = None
+            self.bigger = self.bigger_score = None
+            self.update()
+            self.prompts_changed.emit()
+        else:
+            self.clear_prompts()
         self.request()
+
+    def _depth_under(self):
+        """Depth and alpha of what is drawn on the frame on screen, or None while nothing can say."""
+        renderer = self.renderer
+        if renderer is None or self.camera is None or not hasattr(renderer, "depth_image"):
+            return None
+        with renderer.held(blocking=False) as free:
+            if not free:
+                return None
+            return renderer.depth_image(self.camera, active=self.active)
+
+    def _anchor(self, pixel, label, depth):
+        """A mark on ``pixel`` of the frame on screen, held on the surface under it when there is one."""
+        world = None
+        if depth is not None:
+            surface, alpha = depth
+            x, y = pixel
+            if alpha[y, x] >= MIN_PICK_ALPHA:
+                world = unproject(self.camera, x, y, float(surface[y, x]))
+        return Anchor(world, int(label), pixel)
+
+    def _sync_prompts(self):
+        seen = [a for a in self._anchors if a.pixel is not None]
+        self.points, self.labels = [a.pixel for a in seen], [a.label for a in seen]
+
+    def _reproject(self):
+        """Put the anchors on the frame just drawn; the ones that were on no surface are let go."""
+        camera = self.camera
+        kept = []
+        for anchor in self._anchors:
+            if anchor.world is None:
+                continue
+            x, y, depth = project(camera, np.asarray(anchor.world)[None])
+            px, py = int(round(float(x[0]))), int(round(float(y[0])))
+            inside = depth[0] > camera.near and 0 <= px < camera.width and 0 <= py < camera.height
+            anchor.pixel = (px, py) if inside else None
+            kept.append(anchor)
+        self._anchors = kept
+        self._sync_prompts()
+        self._settle_timer.start()
+        self.update()
+        self.prompts_changed.emit()
+
+    def _settle(self):
+        """The camera has rested: hide the marks that something now stands in front of, and mask again from the rest."""
+        if not self._anchors or self.camera is None or self.pixels is None or self.active is not None or self.segmenter is None:
+            return
+        depth = self._depth_under()
+        if depth is not None:
+            surface, alpha = depth
+            for anchor in self._anchors:
+                if anchor.pixel is None:
+                    continue
+                x, y = anchor.pixel
+                own = float(project(self.camera, np.asarray(anchor.world)[None])[2][0])
+                # Drawn depth is an alpha-weighted mean over translucent layers, so it wanders a little either way;
+                # only a surface clearly nearer than the mark stands in front of it. Further off is just that wander.
+                if alpha[y, x] >= MIN_PICK_ALPHA and own - float(surface[y, x]) > OCCLUDED * own:
+                    anchor.pixel = None
+        self._sync_prompts()
+        if 1 in self.labels:
+            self._segment()
+        else:
+            self.mask = self.score = self._overlay = None
+            self.bigger = self.bigger_score = None
+            self.update()
+            self.prompts_changed.emit()
 
     def show_view(self, view):
         """Stand where a marked view was taken and draw its mask and points over the frame.
@@ -282,7 +384,11 @@ class Viewport(QWidget):
         self.camera, self.pixels, self.render_error = camera, pixels, None
         self.image = QImage(self.pixels.data, width, height, 3 * width, QImage.Format_RGB888).copy()
         self.frame += 1
-        self.clear_prompts()
+        if self._keep_prompts:
+            self._reproject()
+        else:
+            self.clear_prompts()
+        self._keep_prompts = False
         self.rendered.emit((time.perf_counter() - start) * 1000)
         self.update()
 
@@ -310,35 +416,39 @@ class Viewport(QWidget):
 
         Over a marked view that is on screen the point goes on top of that view's own: the
         mask is worked out again from all of them, and the view is what gets corrected.
+        Each point is held on the surface it hit, so it stays there as the camera moves.
         """
         if self.suspended or self.active is not None or self.pixels is None or self.camera is None or self.segmenter is None:
             return
-        before = (self.reviewing, self.editing, list(self.points), list(self.labels))
+        before = (self.reviewing, self.editing, list(self._anchors))
+        depth = self._depth_under()
         if self.reviewing is not None:
             self.editing = self.reviewing[0]
-            self.points, self.labels = list(self.editing.points), list(self.editing.labels)
+            self._anchors = [self._anchor(point, mark, depth) for point, mark in zip(self.editing.points, self.editing.labels)]
         self.reviewing = None
-        self.points.append(self._to_pixels(x, y))
-        self.labels.append(int(label))
+        self._anchors.append(self._anchor(self._to_pixels(x, y), label, depth))
+        self._sync_prompts()
         if not self._segment():
-            self.reviewing, self.editing, self.points, self.labels = before  # back to what was on screen, untouched
+            self.reviewing, self.editing, self._anchors = before  # back to what was on screen, untouched
+            self._sync_prompts()
             self.update()
             self.prompts_changed.emit()
 
     def undo_point(self):
-        if not self.points:
+        if not self._anchors:
             return
-        point, label = self.points.pop(), self.labels.pop()
+        last = self._anchors.pop()
+        self._sync_prompts()
         if not self.points:
             self.clear_prompts()
         elif not self._segment():
-            self.points.append(point)  # keep the prompts that match the mask on screen
-            self.labels.append(label)
+            self._anchors.append(last)  # keep the prompts that match the mask on screen
+            self._sync_prompts()
             self.update()
             self.prompts_changed.emit()
 
     def clear_prompts(self):
-        self.points, self.labels, self.editing = [], [], None
+        self.points, self.labels, self.editing, self._anchors = [], [], None, []
         self.mask = self.score = self._overlay = None
         self.bigger = self.bigger_score = None
         self.update()
@@ -514,7 +624,7 @@ class Viewport(QWidget):
             view, overlay = self.reviewing
             painter.drawImage(self.rect(), overlay)
             self._draw_points(painter, view.points, view.labels, view.camera.width)
-        if self.points:
+        if self.points and self.camera is not None:  # while the camera moves the marks wait for the frame they belong on
             self._draw_points(painter, self.points, self.labels, self.camera.width)
         if self._box is not None:
             start, end = self._box
@@ -532,7 +642,7 @@ class Viewport(QWidget):
 
     def resizeEvent(self, event):
         self._place_overlay()
-        self.view_changed()
+        self.view_changed(keep_prompts=True)
 
     def keyPressEvent(self, event):
         """Space adds the view whose mask is on screen, right where the clicks were made.
@@ -572,7 +682,7 @@ class Viewport(QWidget):
             return
         else:
             return
-        self.view_changed()
+        self.view_changed(keep_prompts=True)
 
     def mouseReleaseEvent(self, event):
         press, self._press = self._press, None
@@ -603,10 +713,10 @@ class Viewport(QWidget):
         point = self.pick(event.position().x(), event.position().y())
         if point is not None:
             self.orbit.look_from(self.orbit.eye, point)
-            self.view_changed()
+            self.view_changed(keep_prompts=True)
 
     def wheelEvent(self, event):
         steps = event.angleDelta().y() / 120
         if self.orbit is not None and steps:  # sideways scrolling does not zoom, so the points stay
             self.orbit.zoom(steps)
-            self.view_changed()
+            self.view_changed(keep_prompts=True)

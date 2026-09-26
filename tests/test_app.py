@@ -845,3 +845,141 @@ def test_a_failed_segmentation_leaves_the_reviewed_view_as_it_was(app, monkeypat
     click(view, 150, 100, Qt.LeftButton)
     assert shown and view.editing is None and view.reviewing is not None and view.points == []
     assert window.views[0].points == ((100, 80),)
+
+
+def wheel(angle):
+    """A wheel turn of ``angle`` eighths of a degree (120 is one notch, in), as the widget gets it."""
+    from PySide6.QtCore import QPoint
+    from PySide6.QtGui import QWheelEvent
+    return QWheelEvent(QPointF(100, 80), QPointF(100, 80), QPoint(0, 0), QPoint(0, angle),
+                       Qt.NoButton, Qt.NoModifier, Qt.NoScrollPhase, False)
+
+
+class GroundRenderer(FlakyRenderer):
+    """A flat ground at y = 0 that every camera sees: what depth_image reports is where a ray meets it."""
+
+    def __init__(self, nearer=1.):
+        super().__init__()
+        self.nearer = nearer  # below 1 the ground reads nearer than it is, as if something stood in front of it
+        self.depth_calls = 0
+
+    def depth_image(self, camera, active=None):
+        self.depth_calls += 1
+        ys, xs = np.mgrid[0:camera.height, 0:camera.width]
+        rays = np.stack([(xs - camera.cx) / camera.fx, (ys - camera.cy) / camera.fy, np.ones(xs.shape)], axis=-1)
+        directions = rays @ camera.world_to_camera[:3, :3]  # camera rays in the world
+        with np.errstate(divide="ignore", invalid="ignore"):
+            s = -camera.eye[1] / directions[..., 1]  # the ray's camera-space depth where it meets y = 0
+        hit = np.isfinite(s) & (s > 0)
+        return np.where(hit, s * self.nearer, 0.), hit.astype(float)
+
+
+def ground_window(renderer=None):
+    fake = FakeSegmenter()
+    window, view = ready_window(fake)
+    view.set_scene(renderer or GroundRenderer(), Orbit(np.zeros(3), 6., pitch=np.deg2rad(35.)))
+    view.render_now()
+    window.select_action.trigger()
+    return window, view, fake
+
+
+def where_is(view, world):
+    from gs_object_extraction.app.pick import project
+    x, y, _ = project(view.camera, np.asarray(world)[None])
+    return int(round(float(x[0]))), int(round(float(y[0])))
+
+
+def test_a_mark_stays_on_its_surface_when_the_wheel_zooms_and_is_masked_again_once_the_camera_rests(app):
+    window, view, fake = ground_window()
+    click(view, view.width() // 2, view.height() // 2 + 20, Qt.LeftButton)
+    assert len(view._anchors) == 1 and view._anchors[0].world is not None  # held on the ground it hit
+    world = view._anchors[0].world
+    assert abs(world[1]) < 1e-6  # on the plane y = 0
+    calls = len(fake.calls)
+    before = view.points[0]
+    view.wheelEvent(wheel(120 * 3))  # three steps in
+    assert view.mask is None and view._anchors  # the old mask is gone at once; the mark is kept
+    view.render_now()
+    assert view.points == [where_is(view, world)] and view.points[0] != before  # the same spot on the ground, on the new frame
+    assert view.labels == [1] and view.mask is None and len(fake.calls) == calls  # SAM2 is left alone while the camera moves
+    view._settle()  # the camera has rested
+    assert view.mask is not None and view.mask[view.points[0][1], view.points[0][0]]
+    assert len(fake.calls) == calls + 1 and fake.calls[-1][1] == view.points
+    assert window.add_button.isEnabled()
+
+
+def test_marks_follow_an_orbit_a_pan_and_a_resize_too_and_undo_still_takes_the_last_one_off(app):
+    window, view, fake = ground_window()
+    click(view, 200, 150, Qt.LeftButton)
+    click(view, 260, 170, Qt.RightButton)
+    worlds = [a.world for a in view._anchors]
+    drag(view, (100, 80), (170, 95), Qt.LeftButton, Qt.AltModifier)  # orbit
+    view.render_now()
+    view._settle()
+    assert view.labels == [1, 0] and view.points == [where_is(view, w) for w in worlds]
+    drag(view, (100, 80), (110, 90), Qt.MiddleButton)  # pan
+    view.render_now()
+    assert view.points == [where_is(view, w) for w in worlds]
+    window.resize(560, 400)  # a new frame size: the widget asks for the frame itself, so it is drawn by the event loop
+    QApplication.processEvents()
+    assert view.camera.height != 316 and view.points == [where_is(view, w) for w in worlds]
+    window.undo_action.trigger()
+    assert view.labels == [1] and len(view._anchors) == 1
+
+
+def test_a_mark_that_something_now_hides_is_left_out_and_comes_back_when_it_is_seen_again(app):
+    ground = GroundRenderer()
+    window, view, fake = ground_window(ground)
+    click(view, 200, 150, Qt.LeftButton)
+    click(view, 260, 170, Qt.LeftButton)
+    ground.nearer = .5  # the ground now reads much nearer than the marks' own depth: something stands in front of them
+    view.wheelEvent(wheel(120))
+    view.render_now()
+    view._settle()
+    assert view.points == [] and len(view._anchors) == 2 and view.mask is None  # hidden, but not forgotten
+    ground.nearer = 1.
+    view.wheelEvent(wheel(-120))
+    view.render_now()
+    view._settle()
+    assert len(view.points) == 2 and view.mask is not None  # seen again
+
+
+def test_a_surface_drawn_further_than_the_mark_does_not_hide_it(app):
+    ground = GroundRenderer()
+    window, view, fake = ground_window(ground)
+    click(view, 200, 150, Qt.LeftButton)
+    ground.nearer = 1.3  # depth is a mean over translucent layers and reads further as often as nearer: no reason to drop the mark
+    view.wheelEvent(wheel(120))
+    view.render_now()
+    view._settle()
+    assert len(view.points) == 1 and view.mask is not None
+
+
+def test_a_mark_on_nothing_solid_does_not_survive_the_camera_moving(app):
+    class Nothing(GroundRenderer):
+        def depth_image(self, camera, active=None):
+            return np.zeros((camera.height, camera.width)), np.zeros((camera.height, camera.width))
+    window, view, fake = ground_window(Nothing())
+    click(view, 200, 150, Qt.LeftButton)
+    assert view._anchors[0].world is None and view.points == [(200, 150)]
+    view.wheelEvent(wheel(120))
+    view.render_now()
+    assert view.points == [] and view._anchors == [] and view.mask is None  # as before: nothing to hold it to
+
+
+def test_correcting_a_marked_view_keeps_its_marks_when_the_camera_moves_but_no_longer_replaces_it(app):
+    window, view, fake = ground_window()
+    click(view, 200, 150, Qt.LeftButton)
+    window.add_view()
+    original = window.views[0]
+    window.view_list.setCurrentRow(0)
+    window.review_view(0)
+    view.render_now()
+    click(view, 260, 170, Qt.LeftButton)
+    assert view.editing is original and len(view._anchors) == 2
+    view.wheelEvent(wheel(120))
+    view.render_now()
+    assert view.editing is None and len(view.points) == 2  # its marks go along, but they are a new mark of the new camera
+    view._settle()
+    window.add_view()
+    assert len(window.views) == 2 and window.views[0] is original  # added as a view of its own
