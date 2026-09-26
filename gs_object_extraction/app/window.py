@@ -511,12 +511,22 @@ class MainWindow(QMainWindow):
             return
         row = self.view_list.currentRow()
         if 0 <= row < len(self.views):
+            reviewing = self.viewport.reviewing  # asked before anything is invalidated, which puts a plain frame back
+            was_shown = reviewing is not None and reviewing[0] is self.views[row]
             self.invalidate_result()
             del self.views[row]
-            with QSignalBlocker(self.view_list):  # the row that takes its place is not a view to go and look at
+            with QSignalBlocker(self.view_list):  # the row that takes its place is not a view to go and look at, unless this one was on screen
                 self.view_list.takeItem(row)
+                if self.views:
+                    self.view_list.setCurrentRow(min(row, len(self.views) - 1))
             for i, marked in enumerate(self.views):
                 self.view_list.item(i).setText(f"View {i + 1}: {int(marked.mask.sum()):,} px")
+            if was_shown:
+                # The removed view's mask is still drawn over the frame: go on to the next view, or to a plain frame when none is left.
+                if self.views:
+                    self.review_view(self.view_list.currentRow())
+                else:
+                    self.viewport.view_changed()
             self.update_extraction_state()
 
     def update_extraction_state(self, *_):

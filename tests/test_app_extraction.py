@@ -1058,3 +1058,41 @@ def test_the_scene_shows_its_own_points_faintly_and_the_kept_ones_darker_over_th
     assert len(view.map_cloud) <= viewport_module.MAP_LIMIT
     view.clear()
     assert view.map_cloud is None and view.cloud is None
+
+
+def views_on_screen(window, count):
+    """A window with ``count`` marked views, each standing somewhere of its own."""
+    for i in range(1, count):
+        camera = Camera.look_at((0, 0, -i * .1), (0, 0, 2), width=30, height=9)
+        window.views.append(MaskedView(camera, MASK.copy(), ((12, 4),), (1,)))
+        window.view_list.addItem(f"View {i + 1}")
+    return window
+
+
+def test_removing_the_view_on_screen_goes_on_to_the_next_one(app, make_window):
+    window, _ = make_window()
+    views_on_screen(window, 3)
+    first, second, third = window.views
+    window.view_list.setCurrentRow(1)
+    assert window.viewport.reviewing[0] is second
+    window.remove_view()
+    assert window.views == [first, third] and window.view_list.count() == 2
+    assert window.view_list.currentRow() == 1 and window.viewport.reviewing[0] is third  # the next one, no leftover of the removed one
+    np.testing.assert_allclose(window.viewport.orbit.eye, third.camera.eye, atol=1e-9)
+    assert window.view_list.item(1).text().startswith("View 2:")  # renumbered
+    window.remove_view()  # the last one goes: the one before it is shown
+    assert window.views == [first] and window.viewport.reviewing[0] is first and window.view_list.currentRow() == 0
+    window.remove_view()  # the only one left goes: a plain frame
+    assert window.views == [] and window.viewport.reviewing is None and window.view_list.count() == 0
+
+
+def test_removing_the_view_on_screen_works_in_the_object_preview_too(app, make_window):
+    window, _ = make_window()
+    views_on_screen(window, 3)
+    extract_object(app, window)
+    assert window.viewport.active is not None  # the object on its own is showing
+    window.view_list.setCurrentRow(2)
+    assert window.viewport.reviewing is not None and window.viewport.reviewing[0] is window.views[2]
+    window.remove_view()  # this also drops the extraction, which puts the scene back
+    assert len(window.views) == 2 and window.viewport.reviewing is not None
+    assert window.viewport.reviewing[0] is window.views[1] and window.view_list.currentRow() == 1
