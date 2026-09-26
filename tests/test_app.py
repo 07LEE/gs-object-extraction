@@ -221,7 +221,9 @@ def test_select_mode_clicks_make_a_mask_and_add_view_keeps_it(app):
     marked = window.views[0]
     assert len(window.views) == 1 and marked.labels == (1,) and marked.mask[80, 100]
     assert marked.mask.shape == (marked.camera.height, marked.camera.width)
-    assert view.points == [] and window.view_list.count() == 1 and not window.add_button.isEnabled()
+    assert view.points == [(100, 80)] and view.kept  # what was added stays on screen ...
+    assert view.reviewing is not None and view.reviewing[0] is marked and view.reviewing[1] is not None  # ... with its saved mask, as it was made
+    assert window.view_list.count() == 1 and not window.add_button.isEnabled()  # ... and cannot be added twice
 
 
 def test_moving_the_view_drops_unconfirmed_points_and_drags_are_not_clicks(app):
@@ -745,8 +747,8 @@ def test_space_over_the_view_adds_the_marked_view_like_enter(app):
     assert window.views == []
     click(view, 100, 80, Qt.LeftButton)
     QTest.keyClick(view, Qt.Key_Space)
-    assert len(window.views) == 1 and window.views[0].mask[80, 100] and view.points == []
-    QTest.keyClick(view, Qt.Key_Space)  # the marks went with the view: a second Space adds nothing
+    assert len(window.views) == 1 and window.views[0].mask[80, 100] and view.points == [(100, 80)] and view.kept
+    QTest.keyClick(view, Qt.Key_Space)  # the marks stay on screen but are already a view: a second Space adds nothing
     assert len(window.views) == 1
     click(view, 100, 80, Qt.LeftButton)
     QTest.keyClick(view, Qt.Key_Space, Qt.ShiftModifier)  # only a bare Space
@@ -801,8 +803,8 @@ def test_a_click_over_a_marked_view_corrects_that_view_and_space_keeps_it_in_pla
     assert len(window.views) == 1 and window.views[0] is not original  # replaced, not added
     assert window.views[0].points == ((100, 80), (150, 100)) and window.views[0].labels == (1, 0)
     assert window.views[0].camera is original.camera  # it is still the view taken from where it was
-    assert view.reviewing is not None and view.reviewing[0] is window.views[0] and view.editing is None
-    assert window.add_button.text() == "Add view" and window.view_list.count() == 1
+    assert view.kept and view.editing is None and view.points == [(100, 80), (150, 100)]  # the corrected marks stay on screen
+    assert not window.add_button.isEnabled() and window.view_list.count() == 1
 
 
 def test_esc_drops_the_corrections_and_shows_the_view_as_it_was_kept(app):
@@ -983,3 +985,59 @@ def test_correcting_a_marked_view_keeps_its_marks_when_the_camera_moves_but_no_l
     view._settle()
     window.add_view()
     assert len(window.views) == 2 and window.views[0] is original  # added as a view of its own
+
+
+def test_a_view_just_added_stays_on_screen_and_follows_the_camera_then_a_click_starts_another(app):
+    window, view, fake = ground_window()
+    click(view, 200, 150, Qt.LeftButton)
+    world = view._anchors[0].world
+    window.add_view()
+    saved = window.views[0]
+    assert len(window.views) == 1 and view.kept and view.points == [(200, 150)]
+    assert view.reviewing[0] is saved and view.reviewing[1] is not None  # its own mask, as it was made
+    assert not window.add_button.isEnabled() and "Added" in window.prompt_label.text()
+    window.add_view()  # already added: nothing more to add
+    assert len(window.views) == 1
+    calls = len(fake.calls)
+    view.wheelEvent(wheel(120 * 3))  # zoom: the camera moves, so the saved mask (a picture from where it was) goes; its marks follow
+    view.render_now()
+    assert view.reviewing is None and view.kept and view.points == [where_is(view, world)]
+    view._settle()
+    assert len(fake.calls) == calls and view.mask is None  # nothing is worked out again for a view that is already saved
+    assert len(window.views) == 1 and window.views[0] is saved and view.kept
+    click(view, 60, 40, Qt.LeftButton)  # the first click of another
+    assert not view.kept and view.points == [(60, 40)] and fake.calls[-1][1] == [(60, 40)]  # not added on top of the first
+    assert window.add_button.isEnabled() and len(fake.calls) == calls + 1
+    window.add_view()
+    assert len(window.views) == 2 and view.kept
+
+
+def test_the_saved_mask_goes_as_soon_as_the_camera_moves_and_only_the_marks_follow(app):
+    window, view, fake = ground_window()
+    click(view, 200, 150, Qt.LeftButton)
+    window.add_view()
+    saved = window.views[0]
+    assert view.reviewing is not None
+    for move in (lambda: view.wheelEvent(wheel(120)),  # a zoom
+                 lambda: drag(view, (100, 80), (140, 100), Qt.MiddleButton),  # a pan
+                 lambda: drag(view, (100, 80), (110, 80), Qt.LeftButton, Qt.AltModifier),  # a small orbit
+                 lambda: drag(view, (100, 80), (110, 80), Qt.RightButton)):  # a look
+        view.reviewing = (saved, view.reviewing[1] if view.reviewing else None)
+        move()
+        view.render_now()
+        assert view.reviewing is None  # a mask made from one camera is not shown from another
+        assert view.kept and view.points  # but the marks are held on the surface and follow
+    assert window.views == [saved] and saved.mask.any()  # the saved view itself is untouched
+    view.set_scene(GroundRenderer(), Orbit(np.zeros(3), 6., pitch=np.deg2rad(35.)))  # a new scene forgets it all
+    assert view.reviewing is None and not view.kept
+
+
+def test_esc_clears_what_was_just_added_from_the_screen_but_not_from_the_views(app):
+    window, view, fake = ground_window()
+    click(view, 200, 150, Qt.LeftButton)
+    window.add_view()
+    assert view.kept
+    window.undo_action.trigger()  # Backspace does not reach into a view that is already added
+    assert view.points == [(200, 150)] and view.kept
+    window.clear_action.trigger()  # Esc
+    assert view.points == [] and view.mask is None and not view.kept and len(window.views) == 1

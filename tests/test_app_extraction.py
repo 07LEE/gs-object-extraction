@@ -700,7 +700,7 @@ def test_choosing_a_view_stands_where_it_was_marked_and_dragging_leaves_it(app, 
     np.testing.assert_allclose(view.orbit.eye, CAMERA.eye, atol=1e-9)
     np.testing.assert_allclose((view.orbit.target - view.orbit.eye) / view.orbit.distance, forward, atol=1e-9)
     assert view.reviewing is not None and view.reviewing[0] is window.views[0]
-    drag(view, (10, 10), (40, 10), Qt.LeftButton, Qt.AltModifier)
+    drag(view, (10, 10), (40, 10), Qt.LeftButton, Qt.AltModifier)  # the camera moves: the mask of that view goes
     assert view.reviewing is None
 
 

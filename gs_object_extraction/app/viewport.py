@@ -170,6 +170,7 @@ class Viewport(QWidget):
         self.frame = 0  # increments with every rendered frame; keys the SAM2 embedding
         self.points, self.labels = [], []  # the marks on the frame on screen, as pixels: those of the anchors that can be seen
         self._anchors = []  # every mark, held on the surface it hit
+        self.kept = False  # the marks and mask on screen were just added as a view: they stay to be seen, and the next click starts afresh
         self._keep_prompts = False  # the camera moved: the anchors go onto the next frame instead of being dropped
         self._settle_timer = QTimer(self)
         self._settle_timer.setSingleShot(True)
@@ -177,7 +178,7 @@ class Viewport(QWidget):
         self._settle_timer.timeout.connect(self._settle)
         self.mask = self.score = self._overlay = None
         self.bigger = self.bigger_score = None  # a larger mask SAM2 offered for the same click
-        self.reviewing = None  # (MaskedView, its overlay) while a marked view is shown; moving the view ends it
+        self.reviewing = None  # (MaskedView, its overlay) while a saved view's mask is shown; moving the view ends it
         self.editing = None  # the marked view whose points and mask are being corrected; the prompts on screen are its own plus the new ones
         self._press = None
         self._dragging = False
@@ -267,6 +268,7 @@ class Viewport(QWidget):
         Marks on the old frame no longer sit where they did, so they are dropped, unless the camera
         merely moved (``keep_prompts``) and they were held on the surface: they are then put back on
         the new frame, and the mask is worked out again once the camera has come to rest.
+        The mask of a saved view belongs to the frame it was made on and to no other, so it goes.
         """
         self.pixels = self.camera = self.reviewing = None
         self._keep_prompts = keep_prompts and any(a.world is not None for a in self._anchors)
@@ -339,7 +341,10 @@ class Viewport(QWidget):
                 if alpha[y, x] >= MIN_PICK_ALPHA and own - float(surface[y, x]) > OCCLUDED * own:
                     anchor.pixel = None
         self._sync_prompts()
-        if 1 in self.labels:
+        if self.kept:
+            self.update()
+            self.prompts_changed.emit()
+        elif 1 in self.labels:
             self._segment()
         else:
             self.mask = self.score = self._overlay = None
@@ -420,22 +425,24 @@ class Viewport(QWidget):
         """
         if self.suspended or self.active is not None or self.pixels is None or self.camera is None or self.segmenter is None:
             return
-        before = (self.reviewing, self.editing, list(self._anchors))
+        before = (self.reviewing, self.editing, list(self._anchors), self.kept)
         depth = self._depth_under()
-        if self.reviewing is not None:
+        if self.kept:  # what was on screen is already a view of its own; this click is the first of another, not a correction of it
+            self._anchors, self.editing, self.kept = [], None, False
+        elif self.reviewing is not None:
             self.editing = self.reviewing[0]
             self._anchors = [self._anchor(point, mark, depth) for point, mark in zip(self.editing.points, self.editing.labels)]
         self.reviewing = None
         self._anchors.append(self._anchor(self._to_pixels(x, y), label, depth))
         self._sync_prompts()
         if not self._segment():
-            self.reviewing, self.editing, self._anchors = before  # back to what was on screen, untouched
+            self.reviewing, self.editing, self._anchors, self.kept = before  # back to what was on screen, untouched
             self._sync_prompts()
             self.update()
             self.prompts_changed.emit()
 
     def undo_point(self):
-        if not self._anchors:
+        if not self._anchors or self.kept:
             return
         last = self._anchors.pop()
         self._sync_prompts()
@@ -447,8 +454,19 @@ class Viewport(QWidget):
             self.update()
             self.prompts_changed.emit()
 
+    def keep_marks(self, view):
+        """``view`` has just been added: its mask stays on screen, and its marks with it, following the camera. The next click starts a new mark."""
+        self.kept = True
+        self.mask = self.score = self._overlay = None  # what was live is now the saved view's, shown as it was made
+        self.bigger = self.bigger_score = None
+        self.reviewing = (view, _mask_image(view.mask))
+        self.update()
+        self.prompts_changed.emit()
+
     def clear_prompts(self):
-        self.points, self.labels, self.editing, self._anchors = [], [], None, []
+        if self.kept:
+            self.reviewing = None  # the saved view that was left on screen goes with the marks
+        self.points, self.labels, self.editing, self._anchors, self.kept = [], [], None, [], False
         self.mask = self.score = self._overlay = None
         self.bigger = self.bigger_score = None
         self.update()
@@ -623,7 +641,8 @@ class Viewport(QWidget):
         if self.reviewing is not None:
             view, overlay = self.reviewing
             painter.drawImage(self.rect(), overlay)
-            self._draw_points(painter, view.points, view.labels, view.camera.width)
+            if not self.points:  # a view just added has its marks held as anchors, drawn below
+                self._draw_points(painter, view.points, view.labels, view.camera.width)
         if self.points and self.camera is not None:  # while the camera moves the marks wait for the frame they belong on
             self._draw_points(painter, self.points, self.labels, self.camera.width)
         if self._box is not None:

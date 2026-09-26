@@ -461,6 +461,8 @@ class MainWindow(QMainWindow):
             text = "Show the Scene to mark more views"
             self.pick_label.setText(f"{picked:,} selected. Press X to delete them" if picked else
                                     "Drag a box or click to select strays" if view.selecting else "")
+        elif view.kept:
+            text = "Added to the views. Click to mark another"
         elif not view.points:
             text = "Click the object" if view.selecting else "Press S to mark the object"
         else:
@@ -476,7 +478,7 @@ class MainWindow(QMainWindow):
                 text += ", add an object point"
         self.prompt_label.setText(text)
         self.bigger_button.setVisible(view.bigger is not None)
-        ready = (self.extraction_job is None and view.active is None and 1 in view.labels
+        ready = (self.extraction_job is None and view.active is None and not view.kept and 1 in view.labels
                  and view.mask is not None and bool(view.mask.any()))
         self.add_button.setText("Update view" if view.editing is not None else "Add view")
         self.add_button.setEnabled(ready)
@@ -491,7 +493,7 @@ class MainWindow(QMainWindow):
     def add_view(self):
         """Keep the mask on screen: as a new view, or in place of the marked view it corrects."""
         view = self.viewport
-        if (self._extracting() or view.active is not None or 1 not in view.labels
+        if (self._extracting() or view.active is not None or view.kept or 1 not in view.labels
                 or view.mask is None or not view.mask.any()):
             return
         editing = next((i for i, marked in enumerate(self.views) if marked is view.editing), None)
@@ -500,8 +502,8 @@ class MainWindow(QMainWindow):
             self.invalidate_result()
             self.views[editing] = marked
             self.view_list.item(editing).setText(f"View {editing + 1}: {int(marked.mask.sum()):,} px")
-            view.clear_prompts()
-            self.review_view(editing)  # the corrected view, as it is kept
+            view.editing = None
+            view.keep_marks(marked)  # the corrected view stays on screen
             self.update_extraction_state()
             self.statusBar().showMessage(f"View {editing + 1} updated")
             return
@@ -509,7 +511,7 @@ class MainWindow(QMainWindow):
         self.invalidate_result()
         self.views.append(marked)
         self.view_list.addItem(f"View {len(self.views)}: {int(marked.mask.sum()):,} px")
-        view.clear_prompts()
+        view.keep_marks(marked)  # it stays on screen, so what was just added can be seen while the camera moves
         self.update_extraction_state()
         self.statusBar().showMessage(f"{len(self.views)} view(s) marked")
 
