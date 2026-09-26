@@ -768,3 +768,80 @@ def test_space_does_not_reach_a_panel_button_that_kept_the_focus(app):
     assert pressed == [True] and window.views == []  # the button took it; the view was not added
     QTest.keyClick(view, Qt.Key_Space)  # a Space that goes to the view
     assert len(window.views) == 1
+
+
+def marked_and_reviewed(app):
+    """A window with one marked view (a click at 100, 80) that is on screen and in select mode."""
+    fake = FakeSegmenter()
+    window, view = ready_window(fake)
+    view.set_scene(FlakyRenderer(), Orbit(np.zeros(3), 3.))
+    view.render_now()  # a real frame, so the view is marked from the camera the widget draws with
+    window.select_action.trigger()
+    click(view, 100, 80, Qt.LeftButton)
+    window.add_view()
+    window.view_list.setCurrentRow(0)
+    window.review_view(0)
+    view.render_now()  # the frame drawn where the view was taken
+    if not view.selecting:
+        window.select_action.trigger()
+    assert view.selecting and view.reviewing is not None and len(window.views) == 1
+    return window, view, fake
+
+
+def test_a_click_over_a_marked_view_corrects_that_view_and_space_keeps_it_in_place(app):
+    from PySide6.QtTest import QTest
+    window, view, fake = marked_and_reviewed(app)
+    original = window.views[0]
+    click(view, 150, 100, Qt.RightButton)  # a background point on top of the view's own object point
+    assert view.editing is original and view.reviewing is None
+    assert view.points == [(100, 80), (150, 100)] and view.labels == [1, 0]  # its own point, then the new one
+    assert fake.calls[-1][1] == [(100, 80), (150, 100)]  # SAM2 saw both
+    assert window.add_button.text() == "Update view" and "Correcting a view" in window.prompt_label.text()
+    QTest.keyClick(view, Qt.Key_Space)
+    assert len(window.views) == 1 and window.views[0] is not original  # replaced, not added
+    assert window.views[0].points == ((100, 80), (150, 100)) and window.views[0].labels == (1, 0)
+    assert window.views[0].camera is original.camera  # it is still the view taken from where it was
+    assert view.reviewing is not None and view.reviewing[0] is window.views[0] and view.editing is None
+    assert window.add_button.text() == "Add view" and window.view_list.count() == 1
+
+
+def test_esc_drops_the_corrections_and_shows_the_view_as_it_was_kept(app):
+    window, view, fake = marked_and_reviewed(app)
+    original = window.views[0]
+    click(view, 150, 100, Qt.LeftButton)
+    assert view.editing is original
+    window.clear_action.trigger()  # Esc
+    assert view.editing is None and window.views[0] is original and window.views == [original]
+    assert view.reviewing is not None and view.reviewing[0] is original
+    assert window.add_button.text() == "Add view"
+
+
+def test_correcting_one_view_leaves_the_others_and_moving_the_camera_ends_the_correction(app):
+    window, view, fake = marked_and_reviewed(app)
+    view.reviewing = None
+    click(view, 200, 150, Qt.LeftButton)  # a fresh mark, not a correction
+    window.add_view()
+    first, second = window.views
+    window.review_view(1)
+    view.render_now()  # the frame the app draws where the view was taken
+    click(view, 60, 40, Qt.LeftButton)  # corrects the second
+    assert view.editing is second
+    window.add_view()
+    assert window.views[0] is first and window.views[1] is not second and len(window.views) == 2
+    view.render_now()
+    window.review_view(0)
+    view.render_now()
+    click(view, 60, 40, Qt.LeftButton)
+    assert view.editing is first
+    drag(view, (100, 80), (160, 80), Qt.LeftButton, Qt.AltModifier)  # the camera moves: the correction is dropped
+    assert view.editing is None and window.views[0] is first
+
+
+def test_a_failed_segmentation_leaves_the_reviewed_view_as_it_was(app, monkeypatch):
+    shown = []
+    monkeypatch.setattr("gs_object_extraction.app.window.QMessageBox.warning", lambda *args: shown.append(args[2]))
+    window, view, fake = marked_and_reviewed(app)
+    fake.fail = True
+    click(view, 150, 100, Qt.LeftButton)
+    assert shown and view.editing is None and view.reviewing is not None and view.points == []
+    assert window.views[0].points == ((100, 80),)

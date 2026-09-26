@@ -156,6 +156,7 @@ class Viewport(QWidget):
         self.mask = self.score = self._overlay = None
         self.bigger = self.bigger_score = None  # a larger mask SAM2 offered for the same click
         self.reviewing = None  # (MaskedView, its overlay) while a marked view is shown; moving the view ends it
+        self.editing = None  # the marked view whose points and mask are being corrected; the prompts on screen are its own plus the new ones
         self._press = None
         self._dragging = False
         self._timer = QTimer(self)
@@ -305,15 +306,22 @@ class Viewport(QWidget):
     # Prompts
 
     def add_point(self, x, y, label):
-        """Add a prompt at widget position (x, y) and update the mask."""
+        """Add a prompt at widget position (x, y) and update the mask.
+
+        Over a marked view that is on screen the point goes on top of that view's own: the
+        mask is worked out again from all of them, and the view is what gets corrected.
+        """
         if self.suspended or self.active is not None or self.pixels is None or self.camera is None or self.segmenter is None:
             return
+        before = (self.reviewing, self.editing, list(self.points), list(self.labels))
+        if self.reviewing is not None:
+            self.editing = self.reviewing[0]
+            self.points, self.labels = list(self.editing.points), list(self.editing.labels)
         self.reviewing = None
         self.points.append(self._to_pixels(x, y))
         self.labels.append(int(label))
         if not self._segment():
-            self.points.pop()
-            self.labels.pop()
+            self.reviewing, self.editing, self.points, self.labels = before  # back to what was on screen, untouched
             self.update()
             self.prompts_changed.emit()
 
@@ -330,7 +338,7 @@ class Viewport(QWidget):
             self.prompts_changed.emit()
 
     def clear_prompts(self):
-        self.points, self.labels = [], []
+        self.points, self.labels, self.editing = [], [], None
         self.mask = self.score = self._overlay = None
         self.bigger = self.bigger_score = None
         self.update()

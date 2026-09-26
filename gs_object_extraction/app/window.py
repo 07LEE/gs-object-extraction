@@ -466,6 +466,8 @@ class MainWindow(QMainWindow):
         else:
             objects = sum(view.labels)
             text = f"{objects} object / {len(view.labels) - objects} background points"
+            if view.editing is not None:
+                text = "Correcting a view: " + text
             if view.mask is not None:
                 text += f", mask {int(view.mask.sum()):,} px (score {view.score:.2f})"
                 if view.bigger is not None:
@@ -476,6 +478,7 @@ class MainWindow(QMainWindow):
         self.bigger_button.setVisible(view.bigger is not None)
         ready = (self.extraction_job is None and view.active is None and 1 in view.labels
                  and view.mask is not None and bool(view.mask.any()))
+        self.add_button.setText("Update view" if view.editing is not None else "Add view")
         self.add_button.setEnabled(ready)
         self.add_view_action.setEnabled(ready)
         self.pick_label.setVisible(bool(self.pick_label.text()))
@@ -486,9 +489,21 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Mask is now {int(self.viewport.mask.sum()):,} px")
 
     def add_view(self):
+        """Keep the mask on screen: as a new view, or in place of the marked view it corrects."""
         view = self.viewport
         if (self._extracting() or view.active is not None or 1 not in view.labels
                 or view.mask is None or not view.mask.any()):
+            return
+        editing = next((i for i, marked in enumerate(self.views) if marked is view.editing), None)
+        if editing is not None:
+            marked = MaskedView(self.views[editing].camera, view.mask.copy(), tuple(view.points), tuple(view.labels))
+            self.invalidate_result()
+            self.views[editing] = marked
+            self.view_list.item(editing).setText(f"View {editing + 1}: {int(marked.mask.sum()):,} px")
+            view.clear_prompts()
+            self.review_view(editing)  # the corrected view, as it is kept
+            self.update_extraction_state()
+            self.statusBar().showMessage(f"View {editing + 1} updated")
             return
         marked = MaskedView(view.camera, view.mask.copy(), tuple(view.points), tuple(view.labels))
         self.invalidate_result()
@@ -504,7 +519,7 @@ class MainWindow(QMainWindow):
         if busy or not 0 <= row < len(self.views):
             return
         if self.viewport.show_view(self.views[row]):
-            self.statusBar().showMessage(f"View {row + 1} of {len(self.views)}. Drag to leave it")
+            self.statusBar().showMessage(f"View {row + 1} of {len(self.views)}. Press S and click to correct it")
 
     def remove_view(self):
         if self._extracting():
@@ -801,7 +816,10 @@ class MainWindow(QMainWindow):
 
     def clear_points(self):
         """Escape: drop the points of the view being marked, or the Gaussians selected in the object."""
+        editing = next((i for i, marked in enumerate(self.views) if marked is self.viewport.editing), None)
         self.viewport.clear_prompts()
+        if editing is not None:
+            self.review_view(editing)  # the corrections are dropped: the view as it was kept is back on screen
         if self._picked is not None:
             self.set_picked(None)
 
