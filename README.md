@@ -2,7 +2,7 @@
 
 Extract an object from a trained 3D Gaussian Splatting scene and export it as a standalone PLY. Open the scene in the viewer, click the object from a few angles, and SAM2 segments those views to identify the object's Gaussians. No source photos are needed.
 
-![A scene and the object extracted from it, turning](docs/images/scene-and-object.webp)
+![A scene, and the object extracted from it on white and on black, turning together](docs/images/scene-and-object.webp)
 
 ## Requirements
 
