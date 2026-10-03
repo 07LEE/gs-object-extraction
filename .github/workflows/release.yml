@@ -48,6 +48,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          python scripts/release_notes.py "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > notes.md
           gh release create "$GITHUB_REF_NAME" dist/* \
-            --verify-tag --title "$GITHUB_REF_NAME" --notes-file notes.md
+            --verify-tag --title "$GITHUB_REF_NAME" --generate-notes
