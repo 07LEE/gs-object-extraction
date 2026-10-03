@@ -23,6 +23,7 @@ MAX_FRAME = .6  # ... and must not swallow the frame
 POINTS = 3  # clicks spread over the silhouette
 NEAR = 1.5  # keep the selection within this many object radii when looking for the object on screen
 DEEP = 8  # click this far inside the outline where the silhouette is wide enough
+DEEP_FRACTION = .1  # ... or this fraction of the silhouette's size, if that is more: a big object's outline is loose
 MAX_FILL = .2  # back the ring off until the object takes at most this much of the frame
 FLOOR = .15  # drop what sits below the object's base plus this many radii: the ground patch under it
 
@@ -81,12 +82,23 @@ def ring(centre, radius, up, *, count=VIEWS, pitch=PITCH, distance=DISTANCE):
 
 
 def inner_part(coverage, depth=DEEP):
-    """The silhouette away from its outline, as deep as it survives being eaten in."""
+    """The silhouette away from its outline, as deep as it survives being eaten in.
+
+    The outline of a silhouette built from Gaussians is loose, more so the bigger the object
+    is on screen, so how far in it goes grows with the silhouette. A big one is eaten on a
+    coarser grid, which is as exact as clicks need and keeps this quick.
+    """
+    depth = max(depth, int(DEEP_FRACTION * np.sqrt(coverage.sum())))
+    step = max(1, depth // 8)
+    small = coverage[::step, ::step]
     for radius in (depth, depth // 2, depth // 4):
+        radius //= step
         if radius >= 1:
-            eroded = coverage & ~disk_dilate(~coverage, radius)
-            if eroded.sum() >= MIN_PIXELS:
-                return eroded
+            eroded = small & ~disk_dilate(~small, radius)
+            if eroded.sum() * step * step >= MIN_PIXELS:
+                inner = np.zeros_like(coverage)
+                inner[::step, ::step] = eroded
+                return inner
     return coverage
 
 

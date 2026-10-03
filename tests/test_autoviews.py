@@ -7,7 +7,7 @@ import pytest
 pytest.importorskip("PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
-from gs_object_extraction.app.autoviews import (AutoMarkJob, DISTANCE, FLOOR, MIN_AGREE, MIN_PIXELS, NEAR, VIEWS,
+from gs_object_extraction.app.autoviews import (AutoMarkJob, DEEP, DISTANCE, FLOOR, MIN_AGREE, MIN_PIXELS, NEAR, VIEWS,
                                                 above_floor, best_candidate, inner_part, object_frame, prompt_points, ring,
                                                 surface_points, usable)
 from gs_object_extraction.app.orbit import Orbit
@@ -93,6 +93,15 @@ def test_prompts_sit_inside_the_outline_and_spread_out():
     assert inner.sum() < coverage.sum() and all(inner[y, x] for x, y in points)
     spread = max(abs(a[0] - b[0]) + abs(a[1] - b[1]) for a in points for b in points)
     assert spread > 10  # not three clicks on the same spot
+
+
+def test_a_big_silhouette_keeps_its_clicks_further_from_the_outline():
+    coverage = disk((480, 640), (240, 320), 200)
+    inner = inner_part(coverage)
+    ys, xs = np.nonzero(inner)
+    reach = 200 - np.sqrt((ys - 240) ** 2 + (xs - 320) ** 2).max()
+    assert reach > 2 * DEEP  # well past the fixed depth a small silhouette gets
+    assert all(coverage[y, x] for x, y in prompt_points(coverage))
 
 
 def test_prompts_avoid_a_hole_in_the_middle():
