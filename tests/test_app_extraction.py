@@ -11,8 +11,9 @@ pytest.importorskip("PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QEvent, QPointF, Qt
 from PySide6.QtGui import QMouseEvent
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QPushButton
 
+from gs_object_extraction.app.export import ExportDialog, ExportOptions
 from gs_object_extraction.app.orbit import Orbit
 from gs_object_extraction.extract import TRIM
 from gs_object_extraction.app.views import MaskedView
@@ -1102,12 +1103,12 @@ def test_export_stands_the_object_up_only_when_asked(app, make_window, tmp_path)
     window, _ = make_window()
     extract_object(app, window)
     window.up_box.setCurrentText("+X")
-    assert not window.upright_box.isChecked()
+    assert window.export_options == ExportOptions()
     assert export_object(app, window, tmp_path / "as_is.ply")
     plain = load_ply(tmp_path / "as_is.ply")
     np.testing.assert_allclose(plain.means, window.trimmed_object().means, atol=1e-5)
 
-    window.upright_box.setChecked(True)
+    window.export_options = ExportOptions(upright=True)
     assert export_object(app, window, tmp_path / "upright.ply")
     upright = load_ply(tmp_path / "upright.ply")
     assert len(upright) == len(plain)
@@ -1122,18 +1123,18 @@ def test_export_puts_the_floor_at_the_origin_only_when_asked(app, make_window, t
     window, _ = make_window()
     extract_object(app, window)
     window.up_box.setCurrentText("+Z")
-    assert not window.ground_box.isChecked()
+    assert not window.export_options.ground
     assert export_object(app, window, tmp_path / "as_is.ply")
     plain = load_ply(tmp_path / "as_is.ply")
 
-    window.ground_box.setChecked(True)
+    window.export_options = ExportOptions(ground=True)
     assert export_object(app, window, tmp_path / "grounded.ply")
     grounded = load_ply(tmp_path / "grounded.ply")
     assert grounded.means[:, 2].min() == pytest.approx(0, abs=1e-5)
     np.testing.assert_allclose(grounded.means[:, :2].mean(axis=0), 0, atol=1e-5)
     np.testing.assert_allclose(grounded.means[:, 2] - plain.means[:, 2], (grounded.means[:, 2] - plain.means[:, 2])[0], atol=1e-5)
 
-    window.upright_box.setChecked(True)  # both: stood up first, then grounded along the new up
+    window.export_options = ExportOptions(upright=True, ground=True)  # both: stood up first, then grounded along the new up
     assert export_object(app, window, tmp_path / "both.ply")
     both = load_ply(tmp_path / "both.ply")
     assert (-both.means[:, 1]).min() == pytest.approx(0, abs=1e-5)
@@ -1143,12 +1144,44 @@ def test_export_puts_the_floor_at_the_origin_only_when_asked(app, make_window, t
 def test_export_lowers_the_colour_detail_only_when_asked(app, make_window, tmp_path):
     window, _ = make_window()
     extract_object(app, window)
-    assert window.detail_box.currentText() == "Keep all"
+    assert window.export_options.sh_degree == 3
     assert export_object(app, window, tmp_path / "full.ply")
     full = load_ply(tmp_path / "full.ply")
 
-    window.detail_box.setCurrentText("Degree 0")
+    window.export_options = ExportOptions(sh_degree=0)
     assert export_object(app, window, tmp_path / "flat.ply")
     flat = load_ply(tmp_path / "flat.ply")
     assert flat.sh.shape[1] == 1 and len(flat) == len(full)
     np.testing.assert_allclose(flat.sh[:, 0], full.sh[:, 0], atol=1e-6)
+
+
+def test_export_asks_for_options_first_and_a_cancel_stops_there(app, make_window, tmp_path, monkeypatch):
+    window, _ = make_window()
+    extract_object(app, window)
+    asked = []
+    monkeypatch.setattr(ExportDialog, "exec", lambda self: asked.append(self.options()) or 0)
+    monkeypatch.setattr("gs_object_extraction.app.window.QFileDialog.exec", lambda self: asked.append("file") or 0)
+    window.choose_export()
+    assert asked == [ExportOptions()]  # the options came up and no file dialog followed
+
+    def accept(self):
+        self.upright_box.setChecked(True)
+        self.detail_box.setCurrentIndex(2)
+        return 1
+
+    asked.clear()
+    monkeypatch.setattr(ExportDialog, "exec", accept)
+    window.choose_export()
+    assert asked == ["file"] and window.export_options == ExportOptions(upright=True, sh_degree=1)
+
+
+def test_export_dialog_shows_the_current_choices_and_confirms_on_the_right(app):
+    options = ExportOptions(upright=True, ground=False, sh_degree=2)
+    dialog = ExportDialog(options)
+    assert dialog.options() == options
+    assert ExportDialog(ExportOptions()).options() == ExportOptions()
+    dialog.show()
+    app.processEvents()
+    buttons = {b.text(): b for b in dialog.findChildren(QPushButton)}
+    assert buttons["OK"].mapTo(dialog, buttons["OK"].rect().topLeft()).x() > buttons["Cancel"].mapTo(dialog, buttons["Cancel"].rect().topLeft()).x()
+    dialog.close()

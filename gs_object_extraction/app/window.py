@@ -4,14 +4,13 @@ from pathlib import Path
 import numpy as np
 from PySide6.QtCore import QSignalBlocker, Qt
 from PySide6.QtGui import QAction, QKeySequence
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QDockWidget, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame,
+from PySide6.QtWidgets import (QComboBox, QDockWidget, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame,
                                QGroupBox, QHBoxLayout, QLabel, QListWidget, QMainWindow, QMessageBox, QProgressBar, QPushButton,
                                QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
 from ..extract import OFF_MASK, TRIM, trim_scales
-from ..upright import grounded, stood_up
 from .autoviews import AutoMarkJob, VIEWS
 from .pick import bounding_box, inside_box
-from .export import ExportJob
+from .export import ExportDialog, ExportJob, ExportOptions
 from .extraction import ExtractionJob
 from .refining import RefineJob
 from .loading import SceneLoadJob, SegmenterLoadJob
@@ -52,6 +51,7 @@ class MainWindow(QMainWindow):
         self.refine_job = None
         self.auto_job = None
         self.export_job = None
+        self.export_options = ExportOptions()
         self.load_job = None
         self._shown_file = ("-", "")
         self._kept = None  # the open work, set aside while a new scene goes up
@@ -287,26 +287,10 @@ class MainWindow(QMainWindow):
         self.export_button = QPushButton("Export object PLY...")
         self.export_button.setStyleSheet("font-weight: bold;")
         self.export_button.clicked.connect(self.choose_export)
-        self.upright_box = QCheckBox("Save standing on its floor")
-        self.upright_box.setToolTip("Turn the object so the Up axis points the way the Graphdeco viewers expect (-Y) "
-                                    "before it is saved. Left off, the object keeps the scene's own orientation.")
-        self.ground_box = QCheckBox("Put its floor at the origin")
-        self.ground_box.setToolTip("Move the object so its lowest point along the Up axis is at zero "
-                                   "and it is centred over the origin. Left off, it keeps its place in the scene.")
-        self.detail_box = QComboBox()
-        self.detail_box.addItems(["Keep all", "Degree 2", "Degree 1", "Degree 0"])
-        self.detail_box.setToolTip("Colour detail to save. Lower degrees make a smaller file "
-                                   "and colours that change less with the viewing direction.")
-        detail = QHBoxLayout()
-        detail.addWidget(QLabel("Colour detail"))
-        detail.addWidget(self.detail_box, 1)
         working = QHBoxLayout()
         working.addWidget(self.progress, 1)
         working.addWidget(self.cancel_button)
         column.addLayout(working)
-        column.addWidget(self.upright_box)
-        column.addWidget(self.ground_box)
-        column.addLayout(detail)
         column.addWidget(self.export_button)
         return footer
 
@@ -980,6 +964,10 @@ class MainWindow(QMainWindow):
     def choose_export(self):
         if not self.export_action.isEnabled():
             return
+        dialog = ExportDialog(self.export_options, self)
+        if not dialog.exec():
+            return
+        self.export_options = dialog.options()
         default = self.source_path.with_name(f"{self.source_path.stem}_object.ply") if self.source_path else Path("object.ply")
         dialog = QFileDialog(self, "Export object PLY", str(default.parent), "PLY files (*.ply)")
         dialog.setAcceptMode(QFileDialog.AcceptSave)
@@ -1008,13 +996,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Cannot export object", str(exc))
             return False
         saved = self.trimmed_object()  # a private copy of the object
-        up = self.up_vector()
-        if self.upright_box.isChecked():
-            saved, up = stood_up(saved, up, DEFAULT_UP), DEFAULT_UP
-        if self.ground_box.isChecked():
-            saved = grounded(saved, up)
-        if self.detail_box.currentIndex():
-            saved = saved.with_sh_degree(3 - self.detail_box.currentIndex())
+        saved = self.export_options.apply(saved, self.up_vector())
         job = ExportJob(saved, path, self)
         self.export_job = job
         job.succeeded.connect(self.export_succeeded)
