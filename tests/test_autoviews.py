@@ -298,9 +298,20 @@ def test_the_window_adds_the_marked_ring_to_its_views(app):
     assert all("(review)" in window.view_list.item(row).text() for row in rows)
     assert not window.extract_action.isEnabled() and not window.extract_button.isEnabled()
     window.viewport.orbit = Orbit((0., 0., 0.), 4.)  # a scene is on screen, so a view can be stood in
-    for row in rows:
+    assert not window.review_button.isHidden() and window.review_action.isEnabled()
+    for row in list(rows)[:3]:  # the next view to review is the next one down the list
+        window.review_next()
+        assert window.view_list.currentRow() == row
+        assert "(review)" not in window.view_list.item(row).text()
+    window.view_list.setCurrentRow(VIEWS)  # the last view, looked at by going there
+    window.review_next()
+    assert window.view_list.currentRow() == 4  # nothing below it is left, so round to the first one that is
+    for row in list(rows)[3:]:
         window.review_view(row)
         assert "(review)" not in window.view_list.item(row).text()
+    assert window.review_button.isHidden() and not window.review_action.isEnabled()
+    window.review_next()
+    assert "looked at" in window.statusBar().currentMessage()
     assert window.extract_action.isEnabled() and window.extract_button.isEnabled()
 
 

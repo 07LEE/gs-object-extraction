@@ -107,7 +107,8 @@ class MainWindow(QMainWindow):
         self.file_menu = self.menuBar().addMenu("&File")
         self.file_menu.addActions([self.open_action, self.export_action, self.quit_action])
         self.select_menu = self.menuBar().addMenu("&Select")
-        self.select_menu.addActions([self.select_action, self.add_view_action, self.undo_action, self.clear_action])
+        self.select_menu.addActions([self.select_action, self.add_view_action, self.undo_action, self.clear_action,
+                                     self.review_action])
         self.menuBar().addMenu("&Extract").addAction(self.extract_action)
         self.edit_menu = self.menuBar().addMenu("&Edit")
         self.edit_menu.addActions([self.delete_action, self.undo_delete_action])
@@ -140,6 +141,7 @@ class MainWindow(QMainWindow):
         self.add_view_action = self._action("&Add view", ("Return", "Enter"), self.add_view)  # main and keypad Enter
         self.undo_action = self._action("&Undo point", "Backspace", self.viewport.undo_point)
         self.clear_action = self._action("&Clear points", "Esc", self.clear_points)
+        self.review_action = self._action("&Next view to review", "N", self.review_next)
         self.extract_action = self._action("&Extract object", "Ctrl+E", self.start_extraction)
         self.export_action = self._action("&Export object PLY...", "Ctrl+Shift+S", self.choose_export)
         self.delete_action = self._action("&Delete selection", ("Delete", "X"), self.delete_selection)
@@ -197,6 +199,10 @@ class MainWindow(QMainWindow):
         self.remove_button = QPushButton("Remove view")
         self.remove_button.setToolTip("Remove the view chosen in the list")
         self.remove_button.clicked.connect(self.remove_view)
+        self.review_button = QPushButton("Next view to review (N)")
+        self.review_button.setToolTip("Go to the next automatic view you have not looked at yet")
+        self.review_button.clicked.connect(self.review_next)
+        self.review_button.hide()
         self.auto_button = QPushButton("Mark around (experimental)")
         self.auto_button.setToolTip("Mark one view first, then this marks a ring of views from it. "
                                     "Check the result: pressing it again keeps what is marked and adds another ring")
@@ -233,6 +239,7 @@ class MainWindow(QMainWindow):
         column.addWidget(self.prompt_label)
         column.addWidget(self.bigger_button)
         column.addWidget(self.view_list)
+        column.addWidget(self.review_button)
         column.addLayout(managing)
         column.addWidget(self.extract_button)  # straight under the views it works from
         column.addWidget(self.result_label)
@@ -543,6 +550,20 @@ class MainWindow(QMainWindow):
             left = f" {len(self._unreviewed)} left to look at." if self._unreviewed else ""
             self.statusBar().showMessage(f"View {row + 1} of {len(self.views)}. Press S and click to correct it.{left}")
 
+    def review_next(self):
+        """Go to the next automatic view not yet looked at, after the one on screen and round to the start."""
+        busy = self._working() or self.load_job is not None
+        pending = [row for row, view in enumerate(self.views) if id(view) in self._unreviewed]
+        if busy or not pending:
+            if not busy:
+                self.statusBar().showMessage("Every automatic view has been looked at")
+            return
+        row = next((r for r in pending if r > self.view_list.currentRow()), pending[0])
+        if row == self.view_list.currentRow():
+            self.review_view(row)
+        else:
+            self.view_list.setCurrentRow(row)  # shows the view, and the list scrolls to it
+
     def remove_view(self):
         if self._extracting():
             return
@@ -578,6 +599,8 @@ class MainWindow(QMainWindow):
         self.extract_action.setEnabled(ready and looked)
         self.extract_button.setEnabled(ready and looked)
         self.extract_button.setToolTip("" if looked else "Look at each automatic view first: click it in the list.")
+        self.review_button.setVisible(bool(self._unreviewed))
+        self.review_action.setEnabled(not busy and bool(self._unreviewed))
         self.export_action.setEnabled(result and not busy)
         self.export_button.setEnabled(result and not busy)
         self.preview_box.setEnabled(result and not busy)
