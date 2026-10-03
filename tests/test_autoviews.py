@@ -130,6 +130,8 @@ def test_a_flagged_view_is_marked_in_the_list(app):
     view = marked_view()
     assert MainWindow.view_label(0, view) == f"View 1: {int(view.mask.sum()):,} px"
     assert MainWindow.view_label(2, replace(view, suspect=True)).endswith("px (check)")
+    assert MainWindow.view_label(0, view, unreviewed=True).endswith("px (review)")
+    assert MainWindow.view_label(0, replace(view, suspect=True), unreviewed=True).endswith("px (review) (check)")
 
 
 def test_the_candidate_closest_to_the_silhouette_wins():
@@ -289,6 +291,34 @@ def test_the_window_adds_the_marked_ring_to_its_views(app):
     assert window.stages is None  # the old result no longer matches the views
     assert "Marked" in window.statusBar().currentMessage()
     assert window.auto_button.isEnabled() and not window.progress.isVisible()
+
+    # Each automatic view has to be looked at before the object is extracted.
+    rows = range(1, 1 + VIEWS)
+    assert "(review)" not in window.view_list.item(0).text()  # the user's own view needs no look
+    assert all("(review)" in window.view_list.item(row).text() for row in rows)
+    assert not window.extract_action.isEnabled() and not window.extract_button.isEnabled()
+    window.viewport.orbit = Orbit((0., 0., 0.), 4.)  # a scene is on screen, so a view can be stood in
+    assert not window.review_button.isHidden() and window.review_action.isEnabled()
+    assert window.review_label.text() == f"Looked at 0 of {VIEWS} automatic views"
+    for row in list(rows)[:3]:  # the next view to review is the next one down the list
+        window.review_next()
+        assert window.view_list.currentRow() == row
+        assert "(review)" not in window.view_list.item(row).text()
+    assert window.review_label.text() == f"Looked at 3 of {VIEWS} automatic views"
+    window.view_list.setCurrentRow(VIEWS)  # the last view, looked at by going there
+    window.review_next()
+    assert window.view_list.currentRow() == 4  # nothing below it is left, so round to the first one that is
+    for row in list(rows)[3:]:
+        window.review_view(row)
+        assert "(review)" not in window.view_list.item(row).text()
+    assert window.review_button.isHidden() and not window.review_action.isEnabled()
+    assert window.review_label.text() == f"Looked at {VIEWS} of {VIEWS} automatic views"
+    window.review_next()
+    assert "looked at" in window.statusBar().currentMessage()
+    window.view_list.setCurrentRow(1)
+    window.remove_view()  # a view that is gone no longer counts
+    assert window.review_label.text() == f"Looked at {VIEWS - 1} of {VIEWS - 1} automatic views"
+    assert window.extract_action.isEnabled() and window.extract_button.isEnabled()
 
 
 def test_cancelling_stops_the_ring(app):

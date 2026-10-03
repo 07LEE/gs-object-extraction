@@ -46,6 +46,8 @@ class MainWindow(QMainWindow):
         self.source_path = None
         self.auto_up = None
         self.views = []
+        self._unreviewed = set()  # ids of the automatic views the user has not yet looked at
+        self._auto = set()  # ids of every automatic view still in the list, looked at or not
         self.stages = None
         self.extraction_job = None
         self.refine_job = None
@@ -106,7 +108,8 @@ class MainWindow(QMainWindow):
         self.file_menu = self.menuBar().addMenu("&File")
         self.file_menu.addActions([self.open_action, self.export_action, self.quit_action])
         self.select_menu = self.menuBar().addMenu("&Select")
-        self.select_menu.addActions([self.select_action, self.add_view_action, self.undo_action, self.clear_action])
+        self.select_menu.addActions([self.select_action, self.add_view_action, self.undo_action, self.clear_action,
+                                     self.review_action])
         self.menuBar().addMenu("&Extract").addAction(self.extract_action)
         self.edit_menu = self.menuBar().addMenu("&Edit")
         self.edit_menu.addActions([self.delete_action, self.undo_delete_action])
@@ -139,6 +142,7 @@ class MainWindow(QMainWindow):
         self.add_view_action = self._action("&Add view", ("Return", "Enter"), self.add_view)  # main and keypad Enter
         self.undo_action = self._action("&Undo point", "Backspace", self.viewport.undo_point)
         self.clear_action = self._action("&Clear points", "Esc", self.clear_points)
+        self.review_action = self._action("&Next view to review", "N", self.review_next)
         self.extract_action = self._action("&Extract object", "Ctrl+E", self.start_extraction)
         self.export_action = self._action("&Export object PLY...", "Ctrl+Shift+S", self.choose_export)
         self.delete_action = self._action("&Delete selection", ("Delete", "X"), self.delete_selection)
@@ -196,6 +200,12 @@ class MainWindow(QMainWindow):
         self.remove_button = QPushButton("Remove view")
         self.remove_button.setToolTip("Remove the view chosen in the list")
         self.remove_button.clicked.connect(self.remove_view)
+        self.review_label = QLabel()
+        self.review_label.hide()
+        self.review_button = QPushButton("Next view to review (N)")
+        self.review_button.setToolTip("Go to the next automatic view you have not looked at yet")
+        self.review_button.clicked.connect(self.review_next)
+        self.review_button.hide()
         self.auto_button = QPushButton("Mark around (experimental)")
         self.auto_button.setToolTip("Mark one view first, then this marks a ring of views from it. "
                                     "Check the result: pressing it again keeps what is marked and adds another ring")
@@ -231,7 +241,9 @@ class MainWindow(QMainWindow):
         column.addLayout(marking)
         column.addWidget(self.prompt_label)
         column.addWidget(self.bigger_button)
+        column.addWidget(self.review_label)
         column.addWidget(self.view_list)
+        column.addWidget(self.review_button)
         column.addLayout(managing)
         column.addWidget(self.extract_button)  # straight under the views it works from
         column.addWidget(self.result_label)
@@ -324,7 +336,7 @@ class MainWindow(QMainWindow):
         """The file read fine: drop the open scene so its GPU memory is free before the new one goes up."""
         if self.scene is not None:
             # Only the GPU side is dropped; the CPU data and the work stay here in case the upload fails.
-            self._kept = dict(scene=self.scene, source_path=self.source_path, views=list(self.views),
+            self._kept = dict(scene=self.scene, source_path=self.source_path, views=list(self.views), unreviewed=set(self._unreviewed), auto=set(self._auto),
                               items=[self.view_list.item(row).text() for row in range(self.view_list.count())],
                               row=self.view_list.currentRow(), stages=self.stages, extracted=self._extracted, refined=self._refined, deleted=list(self._deleted), auto_up=self.auto_up,
                               orbit=self.viewport.orbit or (self._kept or {}).get("orbit"), count=self.count_label.text(),
@@ -332,6 +344,8 @@ class MainWindow(QMainWindow):
         self.scene = self.scene_renderer = self.source_path = None
         self.invalidate_result()
         self.views.clear()
+        self._unreviewed.clear()
+        self._auto.clear()
         self.view_list.clear()
         self.viewport.clear()
         self.count_label.setText("-")
@@ -343,6 +357,7 @@ class MainWindow(QMainWindow):
         # The CPU side comes back first: if the GPU still cannot hold the scene, the work can still be exported.
         self.scene, self.source_path, self.auto_up = kept["scene"], kept["source_path"], kept["auto_up"]
         self.views.extend(kept["views"])
+        self._unreviewed, self._auto = set(kept["unreviewed"]), set(kept["auto"])
         self.view_list.addItems(kept["items"])
         self.view_list.setCurrentRow(kept["row"])
         self.count_label.setText(kept["count"])
@@ -492,9 +507,13 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Mask is now {int(self.viewport.mask.sum()):,} px")
 
     @staticmethod
-    def view_label(index, view):
-        """The line a marked view has in the list; an automatic view that looks off is asked to be checked."""
-        return f"View {index + 1}: {int(view.mask.sum()):,} px" + (" (check)" if view.suspect else "")
+    def view_label(index, view, unreviewed=False):
+        """The line a marked view has in the list: an automatic view is asked to be looked at, and checked if it looks off."""
+        return (f"View {index + 1}: {int(view.mask.sum()):,} px" + (" (review)" if unreviewed else "")
+                + (" (check)" if view.suspect else ""))
+
+    def _label(self, index, view):
+        return self.view_label(index, view, id(view) in self._unreviewed)
 
     def add_view(self):
         """Keep the mask on screen: as a new view, or in place of the marked view it corrects."""
@@ -506,8 +525,13 @@ class MainWindow(QMainWindow):
         if editing is not None:
             marked = MaskedView(self.views[editing].camera, view.mask.copy(), tuple(view.points), tuple(view.labels))
             self.invalidate_result()
+            old = id(self.views[editing])
+            self._unreviewed.discard(old)  # the user has been through it
+            if old in self._auto:  # and it still counts among the automatic views, looked at
+                self._auto.discard(old)
+                self._auto.add(id(marked))
             self.views[editing] = marked
-            self.view_list.item(editing).setText(self.view_label(editing, marked))
+            self.view_list.item(editing).setText(self._label(editing, marked))
             view.editing = None
             view.keep_marks(marked)  # the corrected view stays on screen
             self.update_extraction_state()
@@ -516,7 +540,7 @@ class MainWindow(QMainWindow):
         marked = MaskedView(view.camera, view.mask.copy(), tuple(view.points), tuple(view.labels))
         self.invalidate_result()
         self.views.append(marked)
-        self.view_list.addItem(self.view_label(len(self.views) - 1, marked))
+        self.view_list.addItem(self._label(len(self.views) - 1, marked))
         view.keep_marks(marked)  # it stays on screen, so what was just added can be seen while the camera moves
         self.update_extraction_state()
         self.statusBar().showMessage(f"{len(self.views)} view(s) marked")
@@ -527,7 +551,27 @@ class MainWindow(QMainWindow):
         if busy or not 0 <= row < len(self.views):
             return
         if self.viewport.show_view(self.views[row]):
-            self.statusBar().showMessage(f"View {row + 1} of {len(self.views)}. Press S and click to correct it")
+            view = self.views[row]
+            if id(view) in self._unreviewed:
+                self._unreviewed.discard(id(view))
+                self.view_list.item(row).setText(self._label(row, view))
+                self.update_extraction_state()
+            left = f" {len(self._unreviewed)} left to look at." if self._unreviewed else ""
+            self.statusBar().showMessage(f"View {row + 1} of {len(self.views)}. Press S and click to correct it.{left}")
+
+    def review_next(self):
+        """Go to the next automatic view not yet looked at, after the one on screen and round to the start."""
+        busy = self._working() or self.load_job is not None
+        pending = [row for row, view in enumerate(self.views) if id(view) in self._unreviewed]
+        if busy or not pending:
+            if not busy:
+                self.statusBar().showMessage("Every automatic view has been looked at")
+            return
+        row = next((r for r in pending if r > self.view_list.currentRow()), pending[0])
+        if row == self.view_list.currentRow():
+            self.review_view(row)
+        else:
+            self.view_list.setCurrentRow(row)  # shows the view, and the list scrolls to it
 
     def remove_view(self):
         if self._extracting():
@@ -537,13 +581,15 @@ class MainWindow(QMainWindow):
             reviewing = self.viewport.reviewing  # asked before anything is invalidated, which puts a plain frame back
             was_shown = reviewing is not None and reviewing[0] is self.views[row]
             self.invalidate_result()
+            self._unreviewed.discard(id(self.views[row]))
+            self._auto.discard(id(self.views[row]))
             del self.views[row]
             with QSignalBlocker(self.view_list):  # the row that takes its place is not a view to go and look at, unless this one was on screen
                 self.view_list.takeItem(row)
                 if self.views:
                     self.view_list.setCurrentRow(min(row, len(self.views) - 1))
             for i, marked in enumerate(self.views):
-                self.view_list.item(i).setText(self.view_label(i, marked))
+                self.view_list.item(i).setText(self._label(i, marked))
             if was_shown:
                 # The removed view's mask is still drawn over the frame: go on to the next view, or to a plain frame when none is left.
                 if self.views:
@@ -559,8 +605,14 @@ class MainWindow(QMainWindow):
         self.auto_button.setEnabled(ready and self.viewport.active is None)
         result = self.stages is not None and bool(self.stages["cleaned"].any())
         preview = self.viewport.active is not None
-        self.extract_action.setEnabled(ready)
-        self.extract_button.setEnabled(ready)
+        looked = not self._unreviewed  # every automatic view has been looked at
+        self.extract_action.setEnabled(ready and looked)
+        self.extract_button.setEnabled(ready and looked)
+        self.extract_button.setToolTip("" if looked else "Look at each automatic view first: click it in the list.")
+        self.review_label.setVisible(bool(self._auto))
+        self.review_label.setText(f"Looked at {len(self._auto) - len(self._unreviewed)} of {len(self._auto)} automatic views")
+        self.review_button.setVisible(bool(self._unreviewed))
+        self.review_action.setEnabled(not busy and bool(self._unreviewed))
         self.export_action.setEnabled(result and not busy)
         self.export_button.setEnabled(result and not busy)
         self.preview_box.setEnabled(result and not busy)
@@ -736,11 +788,14 @@ class MainWindow(QMainWindow):
     def auto_marked(self, marked, skipped):
         for view in marked:
             self.views.append(view)
-            self.view_list.addItem(self.view_label(len(self.views) - 1, view))
+            self._unreviewed.add(id(view))
+            self._auto.add(id(view))
+            self.view_list.addItem(self._label(len(self.views) - 1, view))
         if marked:
             self.invalidate_result()
         missed = f", {skipped} view(s) could not be marked" if skipped else ""
         missed += f", {sum(view.suspect for view in marked)} to check" if any(view.suspect for view in marked) else ""
+        missed += ". Look at each one in the list before extracting" if marked else ""
         self.statusBar().showMessage(f"Marked {len(marked)} view(s) around the object{missed}"
                                      if marked else f"No view could be marked{missed}")
 
