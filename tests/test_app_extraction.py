@@ -1096,3 +1096,23 @@ def test_removing_the_view_on_screen_works_in_the_object_preview_too(app, make_w
     window.remove_view()  # this also drops the extraction, which puts the scene back
     assert len(window.views) == 2 and window.viewport.reviewing is not None
     assert window.viewport.reviewing[0] is window.views[1] and window.view_list.currentRow() == 1
+
+
+def test_export_stands_the_object_up_only_when_asked(app, make_window, tmp_path):
+    window, _ = make_window()
+    extract_object(app, window)
+    window.up_box.setCurrentText("+X")
+    assert not window.upright_box.isChecked()
+    assert export_object(app, window, tmp_path / "as_is.ply")
+    plain = load_ply(tmp_path / "as_is.ply")
+    np.testing.assert_allclose(plain.means, window.trimmed_object().means, atol=1e-5)
+
+    window.upright_box.setChecked(True)
+    assert export_object(app, window, tmp_path / "upright.ply")
+    upright = load_ply(tmp_path / "upright.ply")
+    assert len(upright) == len(plain)
+    np.testing.assert_array_equal(upright.ids, plain.ids)
+    # +X was up and -Y is where it ends up, about the object's own centre.
+    offsets, before = upright.means - upright.means.mean(axis=0), plain.means - plain.means.mean(axis=0)
+    np.testing.assert_allclose(offsets[:, 1], -before[:, 0], atol=1e-5)
+    np.testing.assert_allclose(upright.means.mean(axis=0), plain.means.mean(axis=0), atol=1e-5)

@@ -4,10 +4,11 @@ from pathlib import Path
 import numpy as np
 from PySide6.QtCore import QSignalBlocker, Qt
 from PySide6.QtGui import QAction, QKeySequence
-from PySide6.QtWidgets import (QComboBox, QDockWidget, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame,
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDockWidget, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame,
                                QGroupBox, QHBoxLayout, QLabel, QListWidget, QMainWindow, QMessageBox, QProgressBar, QPushButton,
                                QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
 from ..extract import OFF_MASK, TRIM, trim_scales
+from ..upright import stood_up
 from .autoviews import AutoMarkJob, VIEWS
 from .pick import bounding_box, inside_box
 from .export import ExportJob
@@ -286,10 +287,14 @@ class MainWindow(QMainWindow):
         self.export_button = QPushButton("Export object PLY...")
         self.export_button.setStyleSheet("font-weight: bold;")
         self.export_button.clicked.connect(self.choose_export)
+        self.upright_box = QCheckBox("Save standing on its floor")
+        self.upright_box.setToolTip("Turn the object so the Up axis points the way the Graphdeco viewers expect (-Y) "
+                                    "before it is saved. Left off, the object keeps the scene's own orientation.")
         working = QHBoxLayout()
         working.addWidget(self.progress, 1)
         working.addWidget(self.cancel_button)
         column.addLayout(working)
+        column.addWidget(self.upright_box)
         column.addWidget(self.export_button)
         return footer
 
@@ -990,7 +995,10 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.warning(self, "Cannot export object", str(exc))
             return False
-        job = ExportJob(self.trimmed_object(), path, self)  # a private copy of the object
+        saved = self.trimmed_object()  # a private copy of the object
+        if self.upright_box.isChecked():
+            saved = stood_up(saved, self.up_vector(), DEFAULT_UP)
+        job = ExportJob(saved, path, self)
         self.export_job = job
         job.succeeded.connect(self.export_succeeded)
         job.failed.connect(self.export_failed)
