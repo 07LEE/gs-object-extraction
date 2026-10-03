@@ -1141,7 +1141,7 @@ def test_export_puts_the_floor_at_the_origin_only_when_asked(app, make_window, t
     np.testing.assert_allclose(both.means[:, [0, 2]].mean(axis=0), 0, atol=1e-5)
 
 
-def test_export_lowers_the_colour_detail_only_when_asked(app, make_window, tmp_path):
+def test_export_compresses_colour_only_when_asked(app, make_window, tmp_path):
     window, _ = make_window()
     extract_object(app, window)
     assert window.export_options.sh_degree == 3
@@ -1166,7 +1166,7 @@ def test_export_asks_for_options_first_and_a_cancel_stops_there(app, make_window
 
     def accept(self):
         self.upright_box.setChecked(True)
-        self.detail_box.setCurrentIndex(2)
+        self.compression_box.setCurrentIndex(2)
         return 1
 
     asked.clear()

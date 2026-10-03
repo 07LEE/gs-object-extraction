@@ -3,13 +3,13 @@
 from dataclasses import dataclass
 
 from PySide6.QtCore import QThread, Signal
-from PySide6.QtWidgets import QCheckBox, QComboBox, QDialog, QFormLayout, QHBoxLayout, QPushButton, QVBoxLayout
+from PySide6.QtWidgets import QCheckBox, QComboBox, QDialog, QGroupBox, QHBoxLayout, QLabel, QPushButton, QVBoxLayout
 
 from ..ply import save_ply
 from ..upright import grounded, stood_up
 from .orbit import DEFAULT_UP
 
-DETAIL = ("Keep all", "Degree 2", "Degree 1", "Degree 0")  # SH degree 3 down to 0, by position
+COMPRESSION = ("None", "Low", "Medium", "High")  # colour terms kept: SH degree 3 down to 0, by position
 
 
 @dataclass
@@ -37,23 +37,27 @@ class ExportDialog(QDialog):
     def __init__(self, options, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Export options")
-        self.upright_box = QCheckBox("Save standing on its floor")
-        self.upright_box.setToolTip("Turn the object so the Up axis points the way the Graphdeco viewers expect (-Y). "
-                                    "Left off, the object keeps the scene's own orientation.")
-        self.ground_box = QCheckBox("Put its floor at the origin")
-        self.ground_box.setToolTip("Move the object so its lowest point along the Up axis is at zero "
-                                   "and it is centred over the origin. Left off, it keeps its place in the scene.")
-        self.detail_box = QComboBox()
-        self.detail_box.addItems(DETAIL)
-        self.detail_box.setToolTip("Colour detail to save. Lower degrees make a smaller file "
-                                   "and colours that change less with the viewing direction.")
+        self.setMinimumWidth(320)
+        self.upright_box = QCheckBox("Stand on its floor")
+        self.upright_box.setToolTip("Turn the object so its Up axis points -Y, as in Graphdeco's own scenes. "
+                                    "Left off, it keeps the scene's own orientation.")
+        self.ground_box = QCheckBox("Floor at the origin")
+        self.ground_box.setToolTip("Move the object so its lowest point is at zero and it is centred over the origin. "
+                                   "Left off, it keeps its place in the scene.")
+        self.compression_box = QComboBox()
+        self.compression_box.addItems(COMPRESSION)
+        self.compression_box.setToolTip("Higher compression makes a smaller file but drops how colour shifts with the viewing direction, "
+                                        "so shine and reflections fade. None keeps everything.")
         self.upright_box.setChecked(options.upright)
         self.ground_box.setChecked(options.ground)
-        self.detail_box.setCurrentIndex(3 - options.sh_degree)
-        form = QFormLayout()
-        form.addRow(self.upright_box)
-        form.addRow(self.ground_box)
-        form.addRow("Colour detail", self.detail_box)
+        self.compression_box.setCurrentIndex(3 - options.sh_degree)
+        position = QGroupBox("Position")
+        QVBoxLayout(position).addWidget(self.upright_box)
+        position.layout().addWidget(self.ground_box)
+        compression = QGroupBox("Compression")
+        level = QHBoxLayout(compression)
+        level.addWidget(QLabel("Level"))
+        level.addWidget(self.compression_box, 1)
         cancel, ok = QPushButton("Cancel"), QPushButton("OK")
         ok.setDefault(True)
         cancel.clicked.connect(self.reject)
@@ -63,11 +67,12 @@ class ExportDialog(QDialog):
         buttons.addWidget(cancel)
         buttons.addWidget(ok)
         column = QVBoxLayout(self)
-        column.addLayout(form)
+        column.addWidget(position)
+        column.addWidget(compression)
         column.addLayout(buttons)
 
     def options(self):
-        return ExportOptions(self.upright_box.isChecked(), self.ground_box.isChecked(), 3 - self.detail_box.currentIndex())
+        return ExportOptions(self.upright_box.isChecked(), self.ground_box.isChecked(), 3 - self.compression_box.currentIndex())
 
 
 class ExportJob(QThread):
