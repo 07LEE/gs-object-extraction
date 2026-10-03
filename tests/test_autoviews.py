@@ -7,8 +7,8 @@ import pytest
 pytest.importorskip("PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
-from gs_object_extraction.app.autoviews import (AutoMarkJob, DISTANCE, MIN_AGREE, MIN_PIXELS, NEAR, VIEWS,
-                                                best_candidate, inner_part, object_frame, prompt_points, ring,
+from gs_object_extraction.app.autoviews import (AutoMarkJob, DISTANCE, FLOOR, MIN_AGREE, MIN_PIXELS, NEAR, VIEWS,
+                                                above_floor, best_candidate, inner_part, object_frame, prompt_points, ring,
                                                 surface_points, usable)
 from gs_object_extraction.app.orbit import Orbit
 from gs_object_extraction.app.views import MaskedView
@@ -71,6 +71,17 @@ def test_surface_points_need_something_solid():
 
     with pytest.raises(ValueError, match="nothing solid"):
         surface_points(Empty(), [(CAMERA, np.ones(SIZE[::-1], bool))])
+
+
+def test_the_ground_under_the_object_is_dropped():
+    up = (0., 1., 0.)
+    surface = np.array([[x, y, 0.] for x in (-1., 1.) for y in (0., 1., 2.)])  # the marked surface, base at y = 0
+    centre, radius = np.array([0., 1., 0.]), 1.5
+    means = np.array([[0., 1., 0.],  # on the object
+                      [0., 0.05, 0.],  # ground level with the object's base
+                      [0., -0.5, 0.],  # below it
+                      [0., FLOOR * radius + 0.1, 0.]])  # just over the margin
+    np.testing.assert_array_equal(above_floor(means, surface, centre, radius, up), [True, False, False, True])
 
 
 def test_prompts_sit_inside_the_outline_and_spread_out():

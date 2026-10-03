@@ -24,6 +24,7 @@ POINTS = 3  # clicks spread over the silhouette
 NEAR = 1.5  # keep the selection within this many object radii when looking for the object on screen
 DEEP = 8  # click this far inside the outline where the silhouette is wide enough
 MAX_FILL = .2  # back the ring off until the object takes at most this much of the frame
+FLOOR = .15  # drop what sits below the object's base plus this many radii: the ground patch under it
 
 
 def surface_points(renderer, views, step=4, on_view=None):
@@ -57,6 +58,18 @@ def object_frame(points):
     centre = np.median(points, axis=0)
     radius = float(np.percentile(np.linalg.norm(points - centre, axis=1), 95))
     return centre, max(radius, 1e-6)
+
+
+def above_floor(means, surface, centre, radius, up, margin=FLOOR):
+    """Which Gaussians sit above the object's base, a little more than the surface the user marked reaches.
+
+    A selection lifted from one view takes in the ground patch under the object, and a
+    silhouette that holds it sends clicks onto the ground. The marked surface says how low
+    the object goes; the ground is at or below that.
+    """
+    up = np.asarray(up, dtype=float)
+    base = float(np.percentile((np.asarray(surface) - centre) @ up, 2))
+    return (np.asarray(means) - centre) @ up > base + margin * radius
 
 
 def ring(centre, radius, up, *, count=VIEWS, pitch=PITCH, distance=DISTANCE):
@@ -155,10 +168,12 @@ class AutoMarkJob(QThread):
             selection = select(lift_masks(self.renderer, self.views, on_view=self.check))
             if not selection.any():
                 raise ValueError("The marked views do not select any Gaussian yet. Mark the object more closely first.")
-            centre, radius = object_frame(surface_points(self.renderer, self.views, on_view=self.check))
+            surface = surface_points(self.renderer, self.views, on_view=self.check)
+            centre, radius = object_frame(surface)
             # A selection lifted from one view trails off behind the object; only what sits
-            # around the object says where it lands on screen.
+            # around the object, and above the ground it stands on, says where it lands on screen.
             near = selection & (np.linalg.norm(np.asarray(self.means) - centre, axis=1) <= NEAR * radius)
+            near &= above_floor(self.means, surface, centre, radius, self.up)
             if not near.any():
                 raise ValueError("The marked views select nothing near the object.")
             width, height = self.size
