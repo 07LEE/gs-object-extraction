@@ -299,10 +299,12 @@ def test_the_window_adds_the_marked_ring_to_its_views(app):
     assert not window.extract_action.isEnabled() and not window.extract_button.isEnabled()
     window.viewport.orbit = Orbit((0., 0., 0.), 4.)  # a scene is on screen, so a view can be stood in
     assert not window.review_button.isHidden() and window.review_action.isEnabled()
+    assert window.review_label.text() == f"Looked at 0 of {VIEWS} automatic views"
     for row in list(rows)[:3]:  # the next view to review is the next one down the list
         window.review_next()
         assert window.view_list.currentRow() == row
         assert "(review)" not in window.view_list.item(row).text()
+    assert window.review_label.text() == f"Looked at 3 of {VIEWS} automatic views"
     window.view_list.setCurrentRow(VIEWS)  # the last view, looked at by going there
     window.review_next()
     assert window.view_list.currentRow() == 4  # nothing below it is left, so round to the first one that is
@@ -310,8 +312,12 @@ def test_the_window_adds_the_marked_ring_to_its_views(app):
         window.review_view(row)
         assert "(review)" not in window.view_list.item(row).text()
     assert window.review_button.isHidden() and not window.review_action.isEnabled()
+    assert window.review_label.text() == f"Looked at {VIEWS} of {VIEWS} automatic views"
     window.review_next()
     assert "looked at" in window.statusBar().currentMessage()
+    window.view_list.setCurrentRow(1)
+    window.remove_view()  # a view that is gone no longer counts
+    assert window.review_label.text() == f"Looked at {VIEWS - 1} of {VIEWS - 1} automatic views"
     assert window.extract_action.isEnabled() and window.extract_button.isEnabled()
 
 

@@ -47,6 +47,7 @@ class MainWindow(QMainWindow):
         self.auto_up = None
         self.views = []
         self._unreviewed = set()  # ids of the automatic views the user has not yet looked at
+        self._auto = set()  # ids of every automatic view still in the list, looked at or not
         self.stages = None
         self.extraction_job = None
         self.refine_job = None
@@ -199,6 +200,8 @@ class MainWindow(QMainWindow):
         self.remove_button = QPushButton("Remove view")
         self.remove_button.setToolTip("Remove the view chosen in the list")
         self.remove_button.clicked.connect(self.remove_view)
+        self.review_label = QLabel()
+        self.review_label.hide()
         self.review_button = QPushButton("Next view to review (N)")
         self.review_button.setToolTip("Go to the next automatic view you have not looked at yet")
         self.review_button.clicked.connect(self.review_next)
@@ -238,6 +241,7 @@ class MainWindow(QMainWindow):
         column.addLayout(marking)
         column.addWidget(self.prompt_label)
         column.addWidget(self.bigger_button)
+        column.addWidget(self.review_label)
         column.addWidget(self.view_list)
         column.addWidget(self.review_button)
         column.addLayout(managing)
@@ -332,7 +336,7 @@ class MainWindow(QMainWindow):
         """The file read fine: drop the open scene so its GPU memory is free before the new one goes up."""
         if self.scene is not None:
             # Only the GPU side is dropped; the CPU data and the work stay here in case the upload fails.
-            self._kept = dict(scene=self.scene, source_path=self.source_path, views=list(self.views), unreviewed=set(self._unreviewed),
+            self._kept = dict(scene=self.scene, source_path=self.source_path, views=list(self.views), unreviewed=set(self._unreviewed), auto=set(self._auto),
                               items=[self.view_list.item(row).text() for row in range(self.view_list.count())],
                               row=self.view_list.currentRow(), stages=self.stages, extracted=self._extracted, refined=self._refined, deleted=list(self._deleted), auto_up=self.auto_up,
                               orbit=self.viewport.orbit or (self._kept or {}).get("orbit"), count=self.count_label.text(),
@@ -341,6 +345,7 @@ class MainWindow(QMainWindow):
         self.invalidate_result()
         self.views.clear()
         self._unreviewed.clear()
+        self._auto.clear()
         self.view_list.clear()
         self.viewport.clear()
         self.count_label.setText("-")
@@ -352,7 +357,7 @@ class MainWindow(QMainWindow):
         # The CPU side comes back first: if the GPU still cannot hold the scene, the work can still be exported.
         self.scene, self.source_path, self.auto_up = kept["scene"], kept["source_path"], kept["auto_up"]
         self.views.extend(kept["views"])
-        self._unreviewed = set(kept["unreviewed"])
+        self._unreviewed, self._auto = set(kept["unreviewed"]), set(kept["auto"])
         self.view_list.addItems(kept["items"])
         self.view_list.setCurrentRow(kept["row"])
         self.count_label.setText(kept["count"])
@@ -520,7 +525,11 @@ class MainWindow(QMainWindow):
         if editing is not None:
             marked = MaskedView(self.views[editing].camera, view.mask.copy(), tuple(view.points), tuple(view.labels))
             self.invalidate_result()
-            self._unreviewed.discard(id(self.views[editing]))  # the user has been through it
+            old = id(self.views[editing])
+            self._unreviewed.discard(old)  # the user has been through it
+            if old in self._auto:  # and it still counts among the automatic views, looked at
+                self._auto.discard(old)
+                self._auto.add(id(marked))
             self.views[editing] = marked
             self.view_list.item(editing).setText(self._label(editing, marked))
             view.editing = None
@@ -573,6 +582,7 @@ class MainWindow(QMainWindow):
             was_shown = reviewing is not None and reviewing[0] is self.views[row]
             self.invalidate_result()
             self._unreviewed.discard(id(self.views[row]))
+            self._auto.discard(id(self.views[row]))
             del self.views[row]
             with QSignalBlocker(self.view_list):  # the row that takes its place is not a view to go and look at, unless this one was on screen
                 self.view_list.takeItem(row)
@@ -599,6 +609,8 @@ class MainWindow(QMainWindow):
         self.extract_action.setEnabled(ready and looked)
         self.extract_button.setEnabled(ready and looked)
         self.extract_button.setToolTip("" if looked else "Look at each automatic view first: click it in the list.")
+        self.review_label.setVisible(bool(self._auto))
+        self.review_label.setText(f"Looked at {len(self._auto) - len(self._unreviewed)} of {len(self._auto)} automatic views")
         self.review_button.setVisible(bool(self._unreviewed))
         self.review_action.setEnabled(not busy and bool(self._unreviewed))
         self.export_action.setEnabled(result and not busy)
@@ -777,6 +789,7 @@ class MainWindow(QMainWindow):
         for view in marked:
             self.views.append(view)
             self._unreviewed.add(id(view))
+            self._auto.add(id(view))
             self.view_list.addItem(self._label(len(self.views) - 1, view))
         if marked:
             self.invalidate_result()
