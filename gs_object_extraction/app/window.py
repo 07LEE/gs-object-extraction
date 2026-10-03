@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (QComboBox, QDockWidget, QDoubleSpinBox, QFileDial
 from ..extract import OFF_MASK, TRIM, trim_scales
 from .autoviews import AutoMarkJob, VIEWS
 from .pick import bounding_box, inside_box
-from .export import ExportJob
+from .export import ExportDialog, ExportJob, ExportOptions
 from .extraction import ExtractionJob
 from .refining import RefineJob
 from .loading import SceneLoadJob, SegmenterLoadJob
@@ -51,6 +51,7 @@ class MainWindow(QMainWindow):
         self.refine_job = None
         self.auto_job = None
         self.export_job = None
+        self.export_options = ExportOptions()
         self.load_job = None
         self._shown_file = ("-", "")
         self._kept = None  # the open work, set aside while a new scene goes up
@@ -963,6 +964,10 @@ class MainWindow(QMainWindow):
     def choose_export(self):
         if not self.export_action.isEnabled():
             return
+        dialog = ExportDialog(self.export_options, self)
+        if not dialog.exec():
+            return
+        self.export_options = dialog.options()
         default = self.source_path.with_name(f"{self.source_path.stem}_object.ply") if self.source_path else Path("object.ply")
         dialog = QFileDialog(self, "Export object PLY", str(default.parent), "PLY files (*.ply)")
         dialog.setAcceptMode(QFileDialog.AcceptSave)
@@ -990,7 +995,9 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.warning(self, "Cannot export object", str(exc))
             return False
-        job = ExportJob(self.trimmed_object(), path, self)  # a private copy of the object
+        saved = self.trimmed_object()  # a private copy of the object
+        saved = self.export_options.apply(saved, self.up_vector())
+        job = ExportJob(saved, path, self)
         self.export_job = job
         job.succeeded.connect(self.export_succeeded)
         job.failed.connect(self.export_failed)
