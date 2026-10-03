@@ -293,12 +293,20 @@ class MainWindow(QMainWindow):
         self.ground_box = QCheckBox("Put its floor at the origin")
         self.ground_box.setToolTip("Move the object so its lowest point along the Up axis is at zero "
                                    "and it is centred over the origin. Left off, it keeps its place in the scene.")
+        self.detail_box = QComboBox()
+        self.detail_box.addItems(["Keep all", "Degree 2", "Degree 1", "Degree 0"])
+        self.detail_box.setToolTip("Colour detail to save. Lower degrees make a smaller file "
+                                   "and colours that change less with the viewing direction.")
+        detail = QHBoxLayout()
+        detail.addWidget(QLabel("Colour detail"))
+        detail.addWidget(self.detail_box, 1)
         working = QHBoxLayout()
         working.addWidget(self.progress, 1)
         working.addWidget(self.cancel_button)
         column.addLayout(working)
         column.addWidget(self.upright_box)
         column.addWidget(self.ground_box)
+        column.addLayout(detail)
         column.addWidget(self.export_button)
         return footer
 
@@ -1005,6 +1013,8 @@ class MainWindow(QMainWindow):
             saved, up = stood_up(saved, up, DEFAULT_UP), DEFAULT_UP
         if self.ground_box.isChecked():
             saved = grounded(saved, up)
+        if self.detail_box.currentIndex():
+            saved = saved.with_sh_degree(3 - self.detail_box.currentIndex())
         job = ExportJob(saved, path, self)
         self.export_job = job
         job.succeeded.connect(self.export_succeeded)

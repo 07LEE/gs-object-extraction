@@ -75,3 +75,14 @@ def test_grounded_puts_the_lowest_point_and_the_centre_on_the_origin(up):
     np.testing.assert_allclose(shift, np.broadcast_to(shift[0], shift.shape), atol=1e-12)  # moved, not reshaped
     np.testing.assert_array_equal(moved.sh, scene.sh)
     assert len(grounded(scene.subset(np.zeros(len(scene), bool)), up)) == 0
+
+
+@pytest.mark.parametrize("degree, count", [(0, 1), (1, 4), (2, 9), (3, 16)])
+def test_with_sh_degree_keeps_the_low_terms_and_everything_else(degree, count):
+    scene = random_scene()
+    reduced = scene.with_sh_degree(degree)
+    np.testing.assert_array_equal(reduced.sh, scene.sh[:, :count])
+    np.testing.assert_array_equal(reduced.means, scene.means)
+    np.testing.assert_array_equal(reduced.ids, scene.ids)
+    assert scene.sh.shape[1] == 16  # the original is untouched
+    assert random_scene(k=4).with_sh_degree(2).sh.shape[1] == 4

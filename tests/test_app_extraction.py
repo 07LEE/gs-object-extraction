@@ -1138,3 +1138,17 @@ def test_export_puts_the_floor_at_the_origin_only_when_asked(app, make_window, t
     both = load_ply(tmp_path / "both.ply")
     assert (-both.means[:, 1]).min() == pytest.approx(0, abs=1e-5)
     np.testing.assert_allclose(both.means[:, [0, 2]].mean(axis=0), 0, atol=1e-5)
+
+
+def test_export_lowers_the_colour_detail_only_when_asked(app, make_window, tmp_path):
+    window, _ = make_window()
+    extract_object(app, window)
+    assert window.detail_box.currentText() == "Keep all"
+    assert export_object(app, window, tmp_path / "full.ply")
+    full = load_ply(tmp_path / "full.ply")
+
+    window.detail_box.setCurrentText("Degree 0")
+    assert export_object(app, window, tmp_path / "flat.ply")
+    flat = load_ply(tmp_path / "flat.ply")
+    assert flat.sh.shape[1] == 1 and len(flat) == len(full)
+    np.testing.assert_allclose(flat.sh[:, 0], full.sh[:, 0], atol=1e-6)
