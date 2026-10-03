@@ -1116,3 +1116,25 @@ def test_export_stands_the_object_up_only_when_asked(app, make_window, tmp_path)
     offsets, before = upright.means - upright.means.mean(axis=0), plain.means - plain.means.mean(axis=0)
     np.testing.assert_allclose(offsets[:, 1], -before[:, 0], atol=1e-5)
     np.testing.assert_allclose(upright.means.mean(axis=0), plain.means.mean(axis=0), atol=1e-5)
+
+
+def test_export_puts_the_floor_at_the_origin_only_when_asked(app, make_window, tmp_path):
+    window, _ = make_window()
+    extract_object(app, window)
+    window.up_box.setCurrentText("+Z")
+    assert not window.ground_box.isChecked()
+    assert export_object(app, window, tmp_path / "as_is.ply")
+    plain = load_ply(tmp_path / "as_is.ply")
+
+    window.ground_box.setChecked(True)
+    assert export_object(app, window, tmp_path / "grounded.ply")
+    grounded = load_ply(tmp_path / "grounded.ply")
+    assert grounded.means[:, 2].min() == pytest.approx(0, abs=1e-5)
+    np.testing.assert_allclose(grounded.means[:, :2].mean(axis=0), 0, atol=1e-5)
+    np.testing.assert_allclose(grounded.means[:, 2] - plain.means[:, 2], (grounded.means[:, 2] - plain.means[:, 2])[0], atol=1e-5)
+
+    window.upright_box.setChecked(True)  # both: stood up first, then grounded along the new up
+    assert export_object(app, window, tmp_path / "both.ply")
+    both = load_ply(tmp_path / "both.ply")
+    assert (-both.means[:, 1]).min() == pytest.approx(0, abs=1e-5)
+    np.testing.assert_allclose(both.means[:, [0, 2]].mean(axis=0), 0, atol=1e-5)

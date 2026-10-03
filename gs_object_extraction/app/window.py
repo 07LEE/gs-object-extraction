@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDockWidget, QDoubleSpinBox
                                QGroupBox, QHBoxLayout, QLabel, QListWidget, QMainWindow, QMessageBox, QProgressBar, QPushButton,
                                QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
 from ..extract import OFF_MASK, TRIM, trim_scales
-from ..upright import stood_up
+from ..upright import grounded, stood_up
 from .autoviews import AutoMarkJob, VIEWS
 from .pick import bounding_box, inside_box
 from .export import ExportJob
@@ -290,11 +290,15 @@ class MainWindow(QMainWindow):
         self.upright_box = QCheckBox("Save standing on its floor")
         self.upright_box.setToolTip("Turn the object so the Up axis points the way the Graphdeco viewers expect (-Y) "
                                     "before it is saved. Left off, the object keeps the scene's own orientation.")
+        self.ground_box = QCheckBox("Put its floor at the origin")
+        self.ground_box.setToolTip("Move the object so its lowest point along the Up axis is at zero "
+                                   "and it is centred over the origin. Left off, it keeps its place in the scene.")
         working = QHBoxLayout()
         working.addWidget(self.progress, 1)
         working.addWidget(self.cancel_button)
         column.addLayout(working)
         column.addWidget(self.upright_box)
+        column.addWidget(self.ground_box)
         column.addWidget(self.export_button)
         return footer
 
@@ -996,8 +1000,11 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Cannot export object", str(exc))
             return False
         saved = self.trimmed_object()  # a private copy of the object
+        up = self.up_vector()
         if self.upright_box.isChecked():
-            saved = stood_up(saved, self.up_vector(), DEFAULT_UP)
+            saved, up = stood_up(saved, up, DEFAULT_UP), DEFAULT_UP
+        if self.ground_box.isChecked():
+            saved = grounded(saved, up)
         job = ExportJob(saved, path, self)
         self.export_job = job
         job.succeeded.connect(self.export_succeeded)

@@ -59,3 +59,19 @@ def test_stood_up_points_the_up_axis_at_the_target_about_the_centre():
     np.testing.assert_allclose((turned.means - turned.means.mean(axis=0)) @ rotation, scene.means - scene.means.mean(axis=0), atol=1e-12)
     np.testing.assert_array_equal(turned.ids, scene.ids)
     assert len(stood_up(scene.subset(np.zeros(len(scene), bool)), up, target)) == 0
+
+
+@pytest.mark.parametrize("up", [(0., -1., 0.), (0.3, -0.8, 0.5)])
+def test_grounded_puts_the_lowest_point_and_the_centre_on_the_origin(up):
+    from gs_object_extraction.upright import grounded
+    scene = random_scene()
+    scene.means += (4., -7., 2.)
+    moved = grounded(scene, up)
+    direction = np.array(up) / np.linalg.norm(up)
+    assert (moved.means @ direction).min() == pytest.approx(0, abs=1e-12)
+    centre = moved.means.mean(axis=0)
+    np.testing.assert_allclose(centre - (centre @ direction) * direction, 0, atol=1e-12)
+    shift = moved.means - scene.means
+    np.testing.assert_allclose(shift, np.broadcast_to(shift[0], shift.shape), atol=1e-12)  # moved, not reshaped
+    np.testing.assert_array_equal(moved.sh, scene.sh)
+    assert len(grounded(scene.subset(np.zeros(len(scene), bool)), up)) == 0

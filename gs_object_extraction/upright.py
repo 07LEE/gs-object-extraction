@@ -96,3 +96,16 @@ def stood_up(scene: GaussianScene, up, target) -> GaussianScene:
     if len(scene) == 0:
         return scene
     return rotated(scene, rotation_between(up, target), scene.means.mean(axis=0))
+
+
+def grounded(scene: GaussianScene, up) -> GaussianScene:
+    """The scene moved so its centre sits over the origin and its lowest point, along ``up``, is on the origin's level."""
+    if len(scene) == 0:
+        return scene
+    up = np.asarray(up, dtype=np.float64)
+    up = up / np.linalg.norm(up)
+    heights = scene.means @ up
+    centre = scene.means.mean(axis=0)
+    sideways = centre - (centre @ up) * up
+    means = scene.means - sideways - heights.min() * up
+    return GaussianScene(means, scene.scales, scene.quaternions, scene.opacities, scene.sh, scene.ids, scene.extras)

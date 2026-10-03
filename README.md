@@ -35,10 +35,10 @@ gs-object-extraction-gui [scene.ply]
   <img alt="The viewer with one click on the object" src="docs/images/viewer-light.jpg">
 </picture>
 
-1. **Mark views.** Press **S**, click the object, and SAM2 overlays a mask (right-click what it wrongly includes). **Enter** or **Space** adds the view. Points stay on the surface they hit when you zoom, pan or orbit, so zoom in to place them precisely; a view you have added stays on screen with its mask until the camera moves, and its points go on following the surface. Mark about 16 from around the object, camera low; *Mark around* does the ring after one view. Click a view in the list to check it, *Remove view* to drop it.
-2. **Extract.** **Ctrl+E**. The view switches to the object alone.
-3. **Clean up.** In the object preview, press **S** and drag a box or click to select strays (red); **X** or **Delete** removes them, **Ctrl+Z** undoes. *Refine* refits opacity, colour and size so the object stands solid; set *Edge trim* first. *Revert* undoes it.
-4. **Export.** **Ctrl+Shift+S**. Tick *Save standing on its floor* to turn the object so the Up axis points -Y, as in Graphdeco's own scenes; otherwise it keeps the scene's orientation.
+1. **Mark views.** Press **S**, click the object, and SAM2 overlays a mask (right-click what it wrongly includes). **Enter** or **Space** adds the view. Mark about 16 views from around the object, camera low; *Mark around* does the ring after one view.
+2. **Extract.** **Ctrl+E**.
+3. **Clean up.** In the object preview, press **S** to select strays by box or click, **X** removes them, **Ctrl+Z** undoes. *Refine* makes the object stand solid; *Revert* undoes it.
+4. **Export.** **Ctrl+Shift+S**.
 
 The icons in the top right of the view toggle: Gaussians as blue points, object or scene, white or black background, and a box round the kept Gaussians with its size.
 
@@ -60,8 +60,8 @@ The camera moves as in Isaac Sim.
 
 Under *Advanced* in the *Object* panel:
 
-- **Off-mask limit**: lower drops more stray Gaussians, at the cost of thinner edges. Extract again after changing it.
-- **Edge trim**: pulls in Gaussians reaching past the masks; `1.00` leaves them. Applies to the finished object and to the export.
+- **Off-mask limit**: lower drops more stray Gaussians but thins edges. Extract again after changing it.
+- **Edge trim**: pulls in Gaussians reaching past the masks; `1.00` leaves them.
 
 Surfaces missing from the source scene cannot be recovered: an object photographed from one side stays hollow on the other.
 
