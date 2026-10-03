@@ -25,10 +25,10 @@ Set QT_QPA_PLATFORM=offscreen when there is no display. Say in the pull request 
 
 ## Commit messages and pull request titles
 
-Use a type prefix, then a lowercase imperative subject of at most 50 characters with no trailing period, for example "fix: show the next view after removing one". The types are feat, fix, docs, style, refactor, test and chore. Add a one-line body that says why the change is needed.
+Use a type prefix, then a short lowercase imperative subject with no trailing period, for example "fix: show the next view after removing one". The types are feat, fix, docs, style, refactor, test and chore. Add a one-line body that says why the change is needed.
 
 External pull requests are squash merged, so the pull request title becomes the commit subject. Write it in the same format.
 
 ## Pull request description
 
-Follow the pull request template: a short summary of what changed, what you actually checked, and Fixes #N when an issue exists. Leave out anything you did not check unless a reviewer needs it to judge the change.
+Follow the pull request template: say what changed and what you actually checked, and name the related issue if there is one. Leave out anything you did not check unless a reviewer needs it to judge the change.
