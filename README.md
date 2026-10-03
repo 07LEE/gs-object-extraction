@@ -2,7 +2,7 @@
 
 Extract an object from a trained 3D Gaussian Splatting scene and export it as a standalone PLY. Open the scene in the viewer, click the object from a few angles, and SAM2 segments those views to identify the object's Gaussians. No source photos are needed.
 
-![A scene and the object extracted from it, turning](docs/images/scene-and-object.webp)
+![A scene, and the object extracted from it on white and on black, turning together](docs/images/scene-and-object.webp)
 
 ## Requirements
 
@@ -35,7 +35,7 @@ gs-object-extraction-gui [scene.ply]
   <img alt="The viewer with one click on the object" src="docs/images/viewer-light.jpg">
 </picture>
 
-1. **Mark views.** Press **S**, click the object, and SAM2 overlays a mask (right-click what it wrongly includes). **Enter** adds the view. Mark about 16 from around the object, camera low; *Mark around* does the ring after one view. Click a view in the list to check it, *Remove view* to drop it.
+1. **Mark views.** Press **S**, click the object, and SAM2 overlays a mask (right-click what it wrongly includes). **Enter** or **Space** adds the view. Points stay on the surface they hit when you zoom, pan or orbit, so zoom in to place them precisely; a view you have added stays on screen with its mask until the camera moves, and its points go on following the surface. Mark about 16 from around the object, camera low; *Mark around* does the ring after one view. Click a view in the list to check it, *Remove view* to drop it.
 2. **Extract.** **Ctrl+E**. The view switches to the object alone.
 3. **Clean up.** In the object preview, press **S** and drag a box or click to select strays (red); **X** or **Delete** removes them, **Ctrl+Z** undoes. *Refine* refits opacity, colour and size so the object stands solid; set *Edge trim* first. *Revert* undoes it.
 4. **Export.** **Ctrl+Shift+S**.
@@ -49,9 +49,10 @@ The camera moves as in Isaac Sim.
 | Input | Action |
 | --- | --- |
 | Alt + left drag / middle drag / right drag | Orbit / pan / look around |
+| Right drag held + W A S D, Q E | Fly: forward, left, back, right, down, up (Shift: faster; the arrows and Page Up / Down work too) |
 | Alt + right drag, wheel | Zoom |
 | Double-click | Rotation centre under the cursor |
-| S, Enter, Backspace, Esc | Select mode, add view, undo point, clear points or selection |
+| S, Enter or Space, Backspace, Esc | Select mode, add view, undo point, clear points or selection |
 | Shift, Ctrl while selecting | Add to, take away from the selection |
 | Ctrl+E, Ctrl+Shift+S | Extract, export |
 

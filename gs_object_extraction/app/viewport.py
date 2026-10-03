@@ -11,8 +11,9 @@ were not confirmed.
 """
 
 import time
+from dataclasses import dataclass
 import numpy as np
-from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QApplication, QLabel, QToolButton, QWidget
 from .orbit import unproject
@@ -39,6 +40,28 @@ OUTLINE_RGBA = (255, 255, 255, 230)
 OUTLINE = 2  # pixels
 PARTIAL = 2.  # a candidate this much larger than the mask means the click probably caught a part
 POINT_COLORS = {1: QColor(60, 220, 90), 0: QColor(235, 60, 60)}
+FLY_KEYS = {  # (ahead, aside, rise): W A S D walk, Q E go down and up, as in Isaac Sim; the arrow keys and Page Up / Down do the same
+    Qt.Key_W: (1, 0, 0), Qt.Key_S: (-1, 0, 0), Qt.Key_D: (0, 1, 0), Qt.Key_A: (0, -1, 0), Qt.Key_E: (0, 0, 1), Qt.Key_Q: (0, 0, -1),
+    Qt.Key_Up: (1, 0, 0), Qt.Key_Down: (-1, 0, 0), Qt.Key_Right: (0, 1, 0), Qt.Key_Left: (0, -1, 0),
+    Qt.Key_PageUp: (0, 0, 1), Qt.Key_PageDown: (0, 0, -1)}
+FLY_SPEED = .8  # distances to the orbit centre covered in a second
+FLY_FAST = 3.  # ... with Shift held
+FLY_TICK_MS = 16
+SETTLE_MS = 250  # the camera has to rest this long before the marks are worked out again on the new frame
+OCCLUDED = .12  # a mark is hidden when what is drawn there lies this much nearer than the mark, in relative depth
+
+
+@dataclass
+class Anchor:
+    """One click, held where it hit the surface, so it survives the camera moving.
+
+    ``world`` is None where the click hit nothing solid: such a mark exists only on the frame it was made on.
+    ``pixel`` is where it is on the frame on screen, or None while something hides it.
+    """
+
+    world: object
+    label: int
+    pixel: object
 
 
 def _mask_image(mask):
@@ -108,6 +131,7 @@ class Viewport(QWidget):
     render_failed = Signal(str)
     prompts_changed = Signal()
     failed = Signal(str)
+    add_requested = Signal()  # Space over the view: the mask on screen is the one to keep
     select_requested = Signal(float, float, float, float, int)  # a box in the frame's own pixels; 0 replaces, 1 adds to, 2 takes from the selection
 
     def __init__(self, parent=None):
@@ -151,12 +175,27 @@ class Viewport(QWidget):
         self.pixels = None  # uint8 RGB of the frame on screen
         self.camera = None  # camera of the frame on screen
         self.frame = 0  # increments with every rendered frame; keys the SAM2 embedding
-        self.points, self.labels = [], []
+        self.points, self.labels = [], []  # the marks on the frame on screen, as pixels: those of the anchors that can be seen
+        self._anchors = []  # every mark, held on the surface it hit
+        self.kept = False  # the marks and mask on screen were just added as a view: they stay to be seen, and the next click starts afresh
+        self._keep_prompts = False  # the camera moved: the anchors go onto the next frame instead of being dropped
+        self._settle_timer = QTimer(self)
+        self._settle_timer.setSingleShot(True)
+        self._settle_timer.setInterval(SETTLE_MS)
+        self._settle_timer.timeout.connect(self._settle)
         self.mask = self.score = self._overlay = None
         self.bigger = self.bigger_score = None  # a larger mask SAM2 offered for the same click
-        self.reviewing = None  # (MaskedView, its overlay) while a marked view is shown; moving the view ends it
+        self.reviewing = None  # (MaskedView, its overlay) while a saved view's mask is shown; moving the view ends it
+        self.editing = None  # the marked view whose points and mask are being corrected; the prompts on screen are its own plus the new ones
         self._press = None
         self._dragging = False
+        self._flying = False  # the right button is down: the keys walk the camera
+        self._fly_keys = set()
+        self._fly_fast = False
+        self._fly_clock = None
+        self._fly_timer = QTimer(self)
+        self._fly_timer.setInterval(FLY_TICK_MS)
+        self._fly_timer.timeout.connect(self._fly_tick)
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.setInterval(0)
@@ -237,11 +276,95 @@ class Viewport(QWidget):
         """Render on the next event-loop turn; repeated requests collapse into one frame."""
         self._timer.start(delay)
 
-    def view_changed(self):
-        """The camera or the widget size changed: prompts on the old frame no longer apply."""
+    def view_changed(self, keep_prompts=False):
+        """The camera or the widget size changed: the frame is drawn again.
+
+        Marks on the old frame no longer sit where they did, so they are dropped, unless the camera
+        merely moved (``keep_prompts``) and they were held on the surface: they are then put back on
+        the new frame, and the mask is worked out again once the camera has come to rest.
+        The mask of a saved view belongs to the frame it was made on and to no other, so it goes.
+        """
         self.pixels = self.camera = self.reviewing = None
-        self.clear_prompts()
+        self._keep_prompts = keep_prompts and any(a.world is not None for a in self._anchors)
+        if self._keep_prompts:
+            self.editing = None  # what is marked now belongs to a camera of its own, not to the view that was being corrected
+            self.mask = self.score = self._overlay = None
+            self.bigger = self.bigger_score = None
+            self.update()
+            self.prompts_changed.emit()
+        else:
+            self.clear_prompts()
         self.request()
+
+    def _depth_under(self):
+        """Depth and alpha of what is drawn on the frame on screen, or None while nothing can say."""
+        renderer = self.renderer
+        if renderer is None or self.camera is None or not hasattr(renderer, "depth_image"):
+            return None
+        with renderer.held(blocking=False) as free:
+            if not free:
+                return None
+            return renderer.depth_image(self.camera, active=self.active)
+
+    def _anchor(self, pixel, label, depth):
+        """A mark on ``pixel`` of the frame on screen, held on the surface under it when there is one."""
+        world = None
+        if depth is not None:
+            surface, alpha = depth
+            x, y = pixel
+            if alpha[y, x] >= MIN_PICK_ALPHA:
+                world = unproject(self.camera, x, y, float(surface[y, x]))
+        return Anchor(world, int(label), pixel)
+
+    def _sync_prompts(self):
+        seen = [a for a in self._anchors if a.pixel is not None]
+        self.points, self.labels = [a.pixel for a in seen], [a.label for a in seen]
+
+    def _reproject(self):
+        """Put the anchors on the frame just drawn; the ones that were on no surface are let go."""
+        camera = self.camera
+        kept = []
+        for anchor in self._anchors:
+            if anchor.world is None:
+                continue
+            x, y, depth = project(camera, np.asarray(anchor.world)[None])
+            px, py = int(round(float(x[0]))), int(round(float(y[0])))
+            inside = depth[0] > camera.near and 0 <= px < camera.width and 0 <= py < camera.height
+            anchor.pixel = (px, py) if inside else None
+            kept.append(anchor)
+        self._anchors = kept
+        self._sync_prompts()
+        self._settle_timer.start()
+        self.update()
+        self.prompts_changed.emit()
+
+    def _settle(self):
+        """The camera has rested: hide the marks that something now stands in front of, and mask again from the rest."""
+        if not self._anchors or self.camera is None or self.pixels is None or self.active is not None or self.segmenter is None:
+            return
+        depth = self._depth_under()
+        if depth is not None:
+            surface, alpha = depth
+            for anchor in self._anchors:
+                if anchor.pixel is None:
+                    continue
+                x, y = anchor.pixel
+                own = float(project(self.camera, np.asarray(anchor.world)[None])[2][0])
+                # Drawn depth is an alpha-weighted mean over translucent layers, so it wanders a little either way;
+                # only a surface clearly nearer than the mark stands in front of it. Further off is just that wander.
+                if alpha[y, x] >= MIN_PICK_ALPHA and own - float(surface[y, x]) > OCCLUDED * own:
+                    anchor.pixel = None
+        self._sync_prompts()
+        if self.kept:
+            self.update()
+            self.prompts_changed.emit()
+        elif 1 in self.labels:
+            self._segment()
+        else:
+            self.mask = self.score = self._overlay = None
+            self.bigger = self.bigger_score = None
+            self.update()
+            self.prompts_changed.emit()
 
     def show_view(self, view):
         """Stand where a marked view was taken and draw its mask and points over the frame.
@@ -280,7 +403,11 @@ class Viewport(QWidget):
         self.camera, self.pixels, self.render_error = camera, pixels, None
         self.image = QImage(self.pixels.data, width, height, 3 * width, QImage.Format_RGB888).copy()
         self.frame += 1
-        self.clear_prompts()
+        if self._keep_prompts:
+            self._reproject()
+        else:
+            self.clear_prompts()
+        self._keep_prompts = False
         self.rendered.emit((time.perf_counter() - start) * 1000)
         self.update()
 
@@ -304,32 +431,56 @@ class Viewport(QWidget):
     # Prompts
 
     def add_point(self, x, y, label):
-        """Add a prompt at widget position (x, y) and update the mask."""
+        """Add a prompt at widget position (x, y) and update the mask.
+
+        Over a marked view that is on screen the point goes on top of that view's own: the
+        mask is worked out again from all of them, and the view is what gets corrected.
+        Each point is held on the surface it hit, so it stays there as the camera moves.
+        """
         if self.suspended or self.active is not None or self.pixels is None or self.camera is None or self.segmenter is None:
             return
+        before = (self.reviewing, self.editing, list(self._anchors), self.kept)
+        depth = self._depth_under()
+        if self.kept:  # what was on screen is already a view of its own; this click is the first of another, not a correction of it
+            self._anchors, self.editing, self.kept = [], None, False
+        elif self.reviewing is not None:
+            self.editing = self.reviewing[0]
+            self._anchors = [self._anchor(point, mark, depth) for point, mark in zip(self.editing.points, self.editing.labels)]
         self.reviewing = None
-        self.points.append(self._to_pixels(x, y))
-        self.labels.append(int(label))
+        self._anchors.append(self._anchor(self._to_pixels(x, y), label, depth))
+        self._sync_prompts()
         if not self._segment():
-            self.points.pop()
-            self.labels.pop()
+            self.reviewing, self.editing, self._anchors, self.kept = before  # back to what was on screen, untouched
+            self._sync_prompts()
             self.update()
             self.prompts_changed.emit()
 
     def undo_point(self):
-        if not self.points:
+        if not self._anchors or self.kept:
             return
-        point, label = self.points.pop(), self.labels.pop()
+        last = self._anchors.pop()
+        self._sync_prompts()
         if not self.points:
             self.clear_prompts()
         elif not self._segment():
-            self.points.append(point)  # keep the prompts that match the mask on screen
-            self.labels.append(label)
+            self._anchors.append(last)  # keep the prompts that match the mask on screen
+            self._sync_prompts()
             self.update()
             self.prompts_changed.emit()
 
+    def keep_marks(self, view):
+        """``view`` has just been added: its mask stays on screen, and its marks with it, following the camera. The next click starts a new mark."""
+        self.kept = True
+        self.mask = self.score = self._overlay = None  # what was live is now the saved view's, shown as it was made
+        self.bigger = self.bigger_score = None
+        self.reviewing = (view, _mask_image(view.mask))
+        self.update()
+        self.prompts_changed.emit()
+
     def clear_prompts(self):
-        self.points, self.labels = [], []
+        if self.kept:
+            self.reviewing = None  # the saved view that was left on screen goes with the marks
+        self.points, self.labels, self.editing, self._anchors, self.kept = [], [], None, [], False
         self.mask = self.score = self._overlay = None
         self.bigger = self.bigger_score = None
         self.update()
@@ -504,8 +655,9 @@ class Viewport(QWidget):
         if self.reviewing is not None:
             view, overlay = self.reviewing
             painter.drawImage(self.rect(), overlay)
-            self._draw_points(painter, view.points, view.labels, view.camera.width)
-        if self.points:
+            if not self.points:  # a view just added has its marks held as anchors, drawn below
+                self._draw_points(painter, view.points, view.labels, view.camera.width)
+        if self.points and self.camera is not None:  # while the camera moves the marks wait for the frame they belong on
             self._draw_points(painter, self.points, self.labels, self.camera.width)
         if self._box is not None:
             start, end = self._box
@@ -523,11 +675,74 @@ class Viewport(QWidget):
 
     def resizeEvent(self, event):
         self._place_overlay()
-        self.view_changed()
+        self.view_changed(keep_prompts=True)
+
+    def event(self, event):
+        # S selects and X deletes, as window shortcuts; with the right button down the keys are for walking, and the view takes them.
+        if event.type() == QEvent.ShortcutOverride and self._flying and event.key() in FLY_KEYS:
+            event.accept()
+            return True
+        return super().event(event)
+
+    def keyPressEvent(self, event):
+        """Space adds the view whose mask is on screen, right where the clicks were made.
+
+        This is the view's own key rather than a window shortcut on purpose: as a shortcut it would
+        also reach a panel button that still has the focus from an earlier click.
+        With the right button down, W A S D Q E (or the arrows, Page Up and Down) walk the camera.
+        """
+        if self._flying and event.key() in FLY_KEYS:
+            if not event.isAutoRepeat():
+                self._fly_keys.add(event.key())
+                self._fly_fast = bool(event.modifiers() & Qt.ShiftModifier)
+                if not self._fly_timer.isActive():
+                    self._fly_clock = time.perf_counter()
+                    self._fly_timer.start()
+            return
+        if event.key() == Qt.Key_Space and not event.modifiers() and not event.isAutoRepeat():
+            self.add_requested.emit()
+            return
+        super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event):
+        if event.key() in FLY_KEYS and not event.isAutoRepeat():
+            self._fly_keys.discard(event.key())
+            if not self._fly_keys:
+                self._fly_timer.stop()
+            return
+        super().keyReleaseEvent(event)
+
+    def focusOutEvent(self, event):
+        self._stop_flying()  # a key let go while another window had the focus would never be seen to be
+        super().focusOutEvent(event)
+
+    def _stop_flying(self):
+        self._flying = False
+        self._fly_keys.clear()
+        self._fly_timer.stop()
+
+    def _fly_tick(self, seconds=None):
+        """Walk the camera for ``seconds`` (the time since the last tick) in the directions of the keys held."""
+        now = time.perf_counter()
+        if seconds is None:
+            seconds = min(now - (self._fly_clock or now), .1)  # a stall does not become a leap
+        self._fly_clock = now
+        if self.orbit is None or not self._fly_keys:
+            return
+        ahead, aside, rise = (sum(FLY_KEYS[k][i] for k in self._fly_keys) for i in range(3))
+        if not (ahead or aside or rise):
+            return
+        step = seconds * FLY_SPEED * self.orbit.distance * (FLY_FAST if self._fly_fast else 1.)
+        self.orbit.walk(ahead * step, aside * step, rise * step)
+        self._dragging = True  # the button was held to fly: letting go of it is not a click
+        self.view_changed(keep_prompts=True)
 
     def mousePressEvent(self, event):
         self._press = (event.button(), event.position(), event.position(), bool(event.modifiers() & Qt.AltModifier))
         self._dragging = False
+        if event.button() == Qt.RightButton and not event.modifiers() & Qt.AltModifier and self.orbit is not None:
+            self._flying = True  # the keys walk the camera for as long as the button is held
+            self.setFocus()
 
     def mouseMoveEvent(self, event):
         if self._press is None or self.orbit is None:
@@ -552,10 +767,12 @@ class Viewport(QWidget):
             return
         else:
             return
-        self.view_changed()
+        self.view_changed(keep_prompts=True)
 
     def mouseReleaseEvent(self, event):
         press, self._press = self._press, None
+        if press is not None and press[0] == Qt.RightButton:
+            self._stop_flying()
         if press is None or press[3] or press[0] == Qt.MiddleButton:  # Alt or the middle button: the camera's, never a click
             return
         if press[0] == Qt.LeftButton and self.selecting and self.active is not None and self.camera is not None:
@@ -583,10 +800,10 @@ class Viewport(QWidget):
         point = self.pick(event.position().x(), event.position().y())
         if point is not None:
             self.orbit.look_from(self.orbit.eye, point)
-            self.view_changed()
+            self.view_changed(keep_prompts=True)
 
     def wheelEvent(self, event):
         steps = event.angleDelta().y() / 120
         if self.orbit is not None and steps:  # sideways scrolling does not zoom, so the points stay
             self.orbit.zoom(steps)
-            self.view_changed()
+            self.view_changed(keep_prompts=True)

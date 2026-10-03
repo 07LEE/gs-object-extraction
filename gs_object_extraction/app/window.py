@@ -22,10 +22,10 @@ from .views import MaskedView
 
 ON_STYLE = "QPushButton:checked { background: palette(highlight); color: palette(highlighted-text); }"
 TITLE = "3D Gaussian Splatting Object Extraction"
-NAVIGATE_HINT = ("Alt + left drag: orbit   Middle drag: pan   Right drag: look   Alt + right drag or wheel: zoom   "
-                 "Double-click: rotation centre   S: select")
+NAVIGATE_HINT = ("Alt + left drag: orbit   Middle drag: pan   Right drag: look   Right drag + WASD QE: fly   "
+                 "Alt + right drag or wheel: zoom   Double-click: rotation centre   S: select")
 SELECT_HINT = ("Left click: object point   Right click: background point   Backspace: undo   Esc: clear   "
-               "Enter: add view   S: navigate")
+               "Enter or Space: add view   S: navigate")
 PREVIEW_HINT = ("Object preview   Alt + left drag: orbit   Middle drag: pan   Right drag: look   Alt + right drag or wheel: zoom   "
                 "S: select Gaussians   Ctrl+Shift+S: export")
 PICK_HINT = ("Drag: select inside the box   Click: select around the point   Shift: add   Ctrl: take away   "
@@ -69,6 +69,7 @@ class MainWindow(QMainWindow):
         self.viewport.render_failed.connect(lambda message: self.statusBar().showMessage(f"Render failed: {message}"))
         self.viewport.prompts_changed.connect(self.update_prompt_state)
         self.viewport.select_requested.connect(self.pick_region)
+        self.viewport.add_requested.connect(self.add_view)
         self.preview_box = Choice(self.viewport.object_button, ("Scene", "Object only"))  # the two on-screen toggles, read like combo boxes
         self.preview_box.currentIndexChanged.connect(self.update_preview)
         self.background_box = Choice(self.viewport.background_button, ("White", "Black"))
@@ -460,11 +461,15 @@ class MainWindow(QMainWindow):
             text = "Show the Scene to mark more views"
             self.pick_label.setText(f"{picked:,} selected. Press X to delete them" if picked else
                                     "Drag a box or click to select strays" if view.selecting else "")
+        elif view.kept:
+            text = "Added to the views. Click to mark another"
         elif not view.points:
             text = "Click the object" if view.selecting else "Press S to mark the object"
         else:
             objects = sum(view.labels)
             text = f"{objects} object / {len(view.labels) - objects} background points"
+            if view.editing is not None:
+                text = "Correcting a view: " + text
             if view.mask is not None:
                 text += f", mask {int(view.mask.sum()):,} px (score {view.score:.2f})"
                 if view.bigger is not None:
@@ -473,8 +478,9 @@ class MainWindow(QMainWindow):
                 text += ", add an object point"
         self.prompt_label.setText(text)
         self.bigger_button.setVisible(view.bigger is not None)
-        ready = (self.extraction_job is None and view.active is None and 1 in view.labels
+        ready = (self.extraction_job is None and view.active is None and not view.kept and 1 in view.labels
                  and view.mask is not None and bool(view.mask.any()))
+        self.add_button.setText("Update view" if view.editing is not None else "Add view")
         self.add_button.setEnabled(ready)
         self.add_view_action.setEnabled(ready)
         self.pick_label.setVisible(bool(self.pick_label.text()))
@@ -485,15 +491,27 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Mask is now {int(self.viewport.mask.sum()):,} px")
 
     def add_view(self):
+        """Keep the mask on screen: as a new view, or in place of the marked view it corrects."""
         view = self.viewport
-        if (self._extracting() or view.active is not None or 1 not in view.labels
+        if (self._extracting() or view.active is not None or view.kept or 1 not in view.labels
                 or view.mask is None or not view.mask.any()):
+            return
+        editing = next((i for i, marked in enumerate(self.views) if marked is view.editing), None)
+        if editing is not None:
+            marked = MaskedView(self.views[editing].camera, view.mask.copy(), tuple(view.points), tuple(view.labels))
+            self.invalidate_result()
+            self.views[editing] = marked
+            self.view_list.item(editing).setText(f"View {editing + 1}: {int(marked.mask.sum()):,} px")
+            view.editing = None
+            view.keep_marks(marked)  # the corrected view stays on screen
+            self.update_extraction_state()
+            self.statusBar().showMessage(f"View {editing + 1} updated")
             return
         marked = MaskedView(view.camera, view.mask.copy(), tuple(view.points), tuple(view.labels))
         self.invalidate_result()
         self.views.append(marked)
         self.view_list.addItem(f"View {len(self.views)}: {int(marked.mask.sum()):,} px")
-        view.clear_prompts()
+        view.keep_marks(marked)  # it stays on screen, so what was just added can be seen while the camera moves
         self.update_extraction_state()
         self.statusBar().showMessage(f"{len(self.views)} view(s) marked")
 
@@ -503,19 +521,29 @@ class MainWindow(QMainWindow):
         if busy or not 0 <= row < len(self.views):
             return
         if self.viewport.show_view(self.views[row]):
-            self.statusBar().showMessage(f"View {row + 1} of {len(self.views)}. Drag to leave it")
+            self.statusBar().showMessage(f"View {row + 1} of {len(self.views)}. Press S and click to correct it")
 
     def remove_view(self):
         if self._extracting():
             return
         row = self.view_list.currentRow()
         if 0 <= row < len(self.views):
+            reviewing = self.viewport.reviewing  # asked before anything is invalidated, which puts a plain frame back
+            was_shown = reviewing is not None and reviewing[0] is self.views[row]
             self.invalidate_result()
             del self.views[row]
-            with QSignalBlocker(self.view_list):  # the row that takes its place is not a view to go and look at
+            with QSignalBlocker(self.view_list):  # the row that takes its place is not a view to go and look at, unless this one was on screen
                 self.view_list.takeItem(row)
+                if self.views:
+                    self.view_list.setCurrentRow(min(row, len(self.views) - 1))
             for i, marked in enumerate(self.views):
                 self.view_list.item(i).setText(f"View {i + 1}: {int(marked.mask.sum()):,} px")
+            if was_shown:
+                # The removed view's mask is still drawn over the frame: go on to the next view, or to a plain frame when none is left.
+                if self.views:
+                    self.review_view(self.view_list.currentRow())
+                else:
+                    self.viewport.view_changed()
             self.update_extraction_state()
 
     def update_extraction_state(self, *_):
@@ -790,7 +818,10 @@ class MainWindow(QMainWindow):
 
     def clear_points(self):
         """Escape: drop the points of the view being marked, or the Gaussians selected in the object."""
+        editing = next((i for i, marked in enumerate(self.views) if marked is self.viewport.editing), None)
         self.viewport.clear_prompts()
+        if editing is not None:
+            self.review_view(editing)  # the corrections are dropped: the view as it was kept is back on screen
         if self._picked is not None:
             self.set_picked(None)
 

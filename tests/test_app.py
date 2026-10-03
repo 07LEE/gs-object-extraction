@@ -221,7 +221,9 @@ def test_select_mode_clicks_make_a_mask_and_add_view_keeps_it(app):
     marked = window.views[0]
     assert len(window.views) == 1 and marked.labels == (1,) and marked.mask[80, 100]
     assert marked.mask.shape == (marked.camera.height, marked.camera.width)
-    assert view.points == [] and window.view_list.count() == 1 and not window.add_button.isEnabled()
+    assert view.points == [(100, 80)] and view.kept  # what was added stays on screen ...
+    assert view.reviewing is not None and view.reviewing[0] is marked and view.reviewing[1] is not None  # ... with its saved mask, as it was made
+    assert window.view_list.count() == 1 and not window.add_button.isEnabled()  # ... and cannot be added twice
 
 
 def test_moving_the_view_drops_unconfirmed_points_and_drags_are_not_clicks(app):
@@ -735,3 +737,427 @@ def test_a_right_click_still_marks_the_background_and_a_right_drag_looks_instead
     drag(view, (200, 150), (260, 120), Qt.RightButton)  # a drag: the camera looks around, and marks nothing
     assert np.allclose(view.orbit.eye, eye) and not np.allclose(view.orbit.target, target)
     assert len(fake.calls) == calls and view.labels == []  # the view moved, so the unconfirmed points went, as with any camera move
+
+
+def test_space_over_the_view_adds_the_marked_view_like_enter(app):
+    from PySide6.QtTest import QTest
+    window, view = ready_window(FakeSegmenter())
+    window.select_action.trigger()
+    QTest.keyClick(view, Qt.Key_Space)  # nothing marked yet: nothing to add
+    assert window.views == []
+    click(view, 100, 80, Qt.LeftButton)
+    QTest.keyClick(view, Qt.Key_Space)
+    assert len(window.views) == 1 and window.views[0].mask[80, 100] and view.points == [(100, 80)] and view.kept
+    QTest.keyClick(view, Qt.Key_Space)  # the marks stay on screen but are already a view: a second Space adds nothing
+    assert len(window.views) == 1
+    click(view, 100, 80, Qt.LeftButton)
+    QTest.keyClick(view, Qt.Key_Space, Qt.ShiftModifier)  # only a bare Space
+    assert len(window.views) == 1
+    QTest.keyClick(view, Qt.Key_Return)  # Enter still works
+    assert len(window.views) == 2
+
+
+def test_space_does_not_reach_a_panel_button_that_kept_the_focus(app):
+    from PySide6.QtTest import QTest
+    window, view = ready_window(FakeSegmenter())
+    window.select_action.trigger()
+    click(view, 100, 80, Qt.LeftButton)  # a mask is on screen and could be added
+    assert window.add_button.isEnabled()
+    pressed = []
+    window.remove_button.setEnabled(True)
+    window.remove_button.clicked.connect(lambda: pressed.append(True))
+    QTest.keyClick(window.remove_button, Qt.Key_Space)  # a Space that goes to a panel button
+    assert pressed == [True] and window.views == []  # the button took it; the view was not added
+    QTest.keyClick(view, Qt.Key_Space)  # a Space that goes to the view
+    assert len(window.views) == 1
+
+
+def marked_and_reviewed(app):
+    """A window with one marked view (a click at 100, 80) that is on screen and in select mode."""
+    fake = FakeSegmenter()
+    window, view = ready_window(fake)
+    view.set_scene(FlakyRenderer(), Orbit(np.zeros(3), 3.))
+    view.render_now()  # a real frame, so the view is marked from the camera the widget draws with
+    window.select_action.trigger()
+    click(view, 100, 80, Qt.LeftButton)
+    window.add_view()
+    window.view_list.setCurrentRow(0)
+    window.review_view(0)
+    view.render_now()  # the frame drawn where the view was taken
+    if not view.selecting:
+        window.select_action.trigger()
+    assert view.selecting and view.reviewing is not None and len(window.views) == 1
+    return window, view, fake
+
+
+def test_a_click_over_a_marked_view_corrects_that_view_and_space_keeps_it_in_place(app):
+    from PySide6.QtTest import QTest
+    window, view, fake = marked_and_reviewed(app)
+    original = window.views[0]
+    click(view, 150, 100, Qt.RightButton)  # a background point on top of the view's own object point
+    assert view.editing is original and view.reviewing is None
+    assert view.points == [(100, 80), (150, 100)] and view.labels == [1, 0]  # its own point, then the new one
+    assert fake.calls[-1][1] == [(100, 80), (150, 100)]  # SAM2 saw both
+    assert window.add_button.text() == "Update view" and "Correcting a view" in window.prompt_label.text()
+    QTest.keyClick(view, Qt.Key_Space)
+    assert len(window.views) == 1 and window.views[0] is not original  # replaced, not added
+    assert window.views[0].points == ((100, 80), (150, 100)) and window.views[0].labels == (1, 0)
+    assert window.views[0].camera is original.camera  # it is still the view taken from where it was
+    assert view.kept and view.editing is None and view.points == [(100, 80), (150, 100)]  # the corrected marks stay on screen
+    assert not window.add_button.isEnabled() and window.view_list.count() == 1
+
+
+def test_esc_drops_the_corrections_and_shows_the_view_as_it_was_kept(app):
+    window, view, fake = marked_and_reviewed(app)
+    original = window.views[0]
+    click(view, 150, 100, Qt.LeftButton)
+    assert view.editing is original
+    window.clear_action.trigger()  # Esc
+    assert view.editing is None and window.views[0] is original and window.views == [original]
+    assert view.reviewing is not None and view.reviewing[0] is original
+    assert window.add_button.text() == "Add view"
+
+
+def test_correcting_one_view_leaves_the_others_and_moving_the_camera_ends_the_correction(app):
+    window, view, fake = marked_and_reviewed(app)
+    view.reviewing = None
+    click(view, 200, 150, Qt.LeftButton)  # a fresh mark, not a correction
+    window.add_view()
+    first, second = window.views
+    window.review_view(1)
+    view.render_now()  # the frame the app draws where the view was taken
+    click(view, 60, 40, Qt.LeftButton)  # corrects the second
+    assert view.editing is second
+    window.add_view()
+    assert window.views[0] is first and window.views[1] is not second and len(window.views) == 2
+    view.render_now()
+    window.review_view(0)
+    view.render_now()
+    click(view, 60, 40, Qt.LeftButton)
+    assert view.editing is first
+    drag(view, (100, 80), (160, 80), Qt.LeftButton, Qt.AltModifier)  # the camera moves: the correction is dropped
+    assert view.editing is None and window.views[0] is first
+
+
+def test_a_failed_segmentation_leaves_the_reviewed_view_as_it_was(app, monkeypatch):
+    shown = []
+    monkeypatch.setattr("gs_object_extraction.app.window.QMessageBox.warning", lambda *args: shown.append(args[2]))
+    window, view, fake = marked_and_reviewed(app)
+    fake.fail = True
+    click(view, 150, 100, Qt.LeftButton)
+    assert shown and view.editing is None and view.reviewing is not None and view.points == []
+    assert window.views[0].points == ((100, 80),)
+
+
+def wheel(angle):
+    """A wheel turn of ``angle`` eighths of a degree (120 is one notch, in), as the widget gets it."""
+    from PySide6.QtCore import QPoint
+    from PySide6.QtGui import QWheelEvent
+    return QWheelEvent(QPointF(100, 80), QPointF(100, 80), QPoint(0, 0), QPoint(0, angle),
+                       Qt.NoButton, Qt.NoModifier, Qt.NoScrollPhase, False)
+
+
+class GroundRenderer(FlakyRenderer):
+    """A flat ground at y = 0 that every camera sees: what depth_image reports is where a ray meets it."""
+
+    def __init__(self, nearer=1.):
+        super().__init__()
+        self.nearer = nearer  # below 1 the ground reads nearer than it is, as if something stood in front of it
+        self.depth_calls = 0
+
+    def depth_image(self, camera, active=None):
+        self.depth_calls += 1
+        ys, xs = np.mgrid[0:camera.height, 0:camera.width]
+        rays = np.stack([(xs - camera.cx) / camera.fx, (ys - camera.cy) / camera.fy, np.ones(xs.shape)], axis=-1)
+        directions = rays @ camera.world_to_camera[:3, :3]  # camera rays in the world
+        with np.errstate(divide="ignore", invalid="ignore"):
+            s = -camera.eye[1] / directions[..., 1]  # the ray's camera-space depth where it meets y = 0
+        hit = np.isfinite(s) & (s > 0)
+        return np.where(hit, s * self.nearer, 0.), hit.astype(float)
+
+
+def ground_window(renderer=None):
+    fake = FakeSegmenter()
+    window, view = ready_window(fake)
+    view.set_scene(renderer or GroundRenderer(), Orbit(np.zeros(3), 6., pitch=np.deg2rad(35.)))
+    view.render_now()
+    window.select_action.trigger()
+    return window, view, fake
+
+
+def where_is(view, world):
+    from gs_object_extraction.app.pick import project
+    x, y, _ = project(view.camera, np.asarray(world)[None])
+    return int(round(float(x[0]))), int(round(float(y[0])))
+
+
+def test_a_mark_stays_on_its_surface_when_the_wheel_zooms_and_is_masked_again_once_the_camera_rests(app):
+    window, view, fake = ground_window()
+    click(view, view.width() // 2, view.height() // 2 + 20, Qt.LeftButton)
+    assert len(view._anchors) == 1 and view._anchors[0].world is not None  # held on the ground it hit
+    world = view._anchors[0].world
+    assert abs(world[1]) < 1e-6  # on the plane y = 0
+    calls = len(fake.calls)
+    before = view.points[0]
+    view.wheelEvent(wheel(120 * 3))  # three steps in
+    assert view.mask is None and view._anchors  # the old mask is gone at once; the mark is kept
+    view.render_now()
+    assert view.points == [where_is(view, world)] and view.points[0] != before  # the same spot on the ground, on the new frame
+    assert view.labels == [1] and view.mask is None and len(fake.calls) == calls  # SAM2 is left alone while the camera moves
+    view._settle()  # the camera has rested
+    assert view.mask is not None and view.mask[view.points[0][1], view.points[0][0]]
+    assert len(fake.calls) == calls + 1 and fake.calls[-1][1] == view.points
+    assert window.add_button.isEnabled()
+
+
+def test_marks_follow_an_orbit_a_pan_and_a_resize_too_and_undo_still_takes_the_last_one_off(app):
+    window, view, fake = ground_window()
+    click(view, 200, 150, Qt.LeftButton)
+    click(view, 260, 170, Qt.RightButton)
+    worlds = [a.world for a in view._anchors]
+    drag(view, (100, 80), (170, 95), Qt.LeftButton, Qt.AltModifier)  # orbit
+    view.render_now()
+    view._settle()
+    assert view.labels == [1, 0] and view.points == [where_is(view, w) for w in worlds]
+    drag(view, (100, 80), (110, 90), Qt.MiddleButton)  # pan
+    view.render_now()
+    assert view.points == [where_is(view, w) for w in worlds]
+    window.resize(560, 400)  # a new frame size: the widget asks for the frame itself, so it is drawn by the event loop
+    QApplication.processEvents()
+    assert view.camera.height != 316 and view.points == [where_is(view, w) for w in worlds]
+    window.undo_action.trigger()
+    assert view.labels == [1] and len(view._anchors) == 1
+
+
+def test_a_mark_that_something_now_hides_is_left_out_and_comes_back_when_it_is_seen_again(app):
+    ground = GroundRenderer()
+    window, view, fake = ground_window(ground)
+    click(view, 200, 150, Qt.LeftButton)
+    click(view, 260, 170, Qt.LeftButton)
+    ground.nearer = .5  # the ground now reads much nearer than the marks' own depth: something stands in front of them
+    view.wheelEvent(wheel(120))
+    view.render_now()
+    view._settle()
+    assert view.points == [] and len(view._anchors) == 2 and view.mask is None  # hidden, but not forgotten
+    ground.nearer = 1.
+    view.wheelEvent(wheel(-120))
+    view.render_now()
+    view._settle()
+    assert len(view.points) == 2 and view.mask is not None  # seen again
+
+
+def test_a_surface_drawn_further_than_the_mark_does_not_hide_it(app):
+    ground = GroundRenderer()
+    window, view, fake = ground_window(ground)
+    click(view, 200, 150, Qt.LeftButton)
+    ground.nearer = 1.3  # depth is a mean over translucent layers and reads further as often as nearer: no reason to drop the mark
+    view.wheelEvent(wheel(120))
+    view.render_now()
+    view._settle()
+    assert len(view.points) == 1 and view.mask is not None
+
+
+def test_a_mark_on_nothing_solid_does_not_survive_the_camera_moving(app):
+    class Nothing(GroundRenderer):
+        def depth_image(self, camera, active=None):
+            return np.zeros((camera.height, camera.width)), np.zeros((camera.height, camera.width))
+    window, view, fake = ground_window(Nothing())
+    click(view, 200, 150, Qt.LeftButton)
+    assert view._anchors[0].world is None and view.points == [(200, 150)]
+    view.wheelEvent(wheel(120))
+    view.render_now()
+    assert view.points == [] and view._anchors == [] and view.mask is None  # as before: nothing to hold it to
+
+
+def test_correcting_a_marked_view_keeps_its_marks_when_the_camera_moves_but_no_longer_replaces_it(app):
+    window, view, fake = ground_window()
+    click(view, 200, 150, Qt.LeftButton)
+    window.add_view()
+    original = window.views[0]
+    window.view_list.setCurrentRow(0)
+    window.review_view(0)
+    view.render_now()
+    click(view, 260, 170, Qt.LeftButton)
+    assert view.editing is original and len(view._anchors) == 2
+    view.wheelEvent(wheel(120))
+    view.render_now()
+    assert view.editing is None and len(view.points) == 2  # its marks go along, but they are a new mark of the new camera
+    view._settle()
+    window.add_view()
+    assert len(window.views) == 2 and window.views[0] is original  # added as a view of its own
+
+
+def test_a_view_just_added_stays_on_screen_and_follows_the_camera_then_a_click_starts_another(app):
+    window, view, fake = ground_window()
+    click(view, 200, 150, Qt.LeftButton)
+    world = view._anchors[0].world
+    window.add_view()
+    saved = window.views[0]
+    assert len(window.views) == 1 and view.kept and view.points == [(200, 150)]
+    assert view.reviewing[0] is saved and view.reviewing[1] is not None  # its own mask, as it was made
+    assert not window.add_button.isEnabled() and "Added" in window.prompt_label.text()
+    window.add_view()  # already added: nothing more to add
+    assert len(window.views) == 1
+    calls = len(fake.calls)
+    view.wheelEvent(wheel(120 * 3))  # zoom: the camera moves, so the saved mask (a picture from where it was) goes; its marks follow
+    view.render_now()
+    assert view.reviewing is None and view.kept and view.points == [where_is(view, world)]
+    view._settle()
+    assert len(fake.calls) == calls and view.mask is None  # nothing is worked out again for a view that is already saved
+    assert len(window.views) == 1 and window.views[0] is saved and view.kept
+    click(view, 60, 40, Qt.LeftButton)  # the first click of another
+    assert not view.kept and view.points == [(60, 40)] and fake.calls[-1][1] == [(60, 40)]  # not added on top of the first
+    assert window.add_button.isEnabled() and len(fake.calls) == calls + 1
+    window.add_view()
+    assert len(window.views) == 2 and view.kept
+
+
+def test_the_saved_mask_goes_as_soon_as_the_camera_moves_and_only_the_marks_follow(app):
+    window, view, fake = ground_window()
+    click(view, 200, 150, Qt.LeftButton)
+    window.add_view()
+    saved = window.views[0]
+    assert view.reviewing is not None
+    for move in (lambda: view.wheelEvent(wheel(120)),  # a zoom
+                 lambda: drag(view, (100, 80), (140, 100), Qt.MiddleButton),  # a pan
+                 lambda: drag(view, (100, 80), (110, 80), Qt.LeftButton, Qt.AltModifier),  # a small orbit
+                 lambda: drag(view, (100, 80), (110, 80), Qt.RightButton)):  # a look
+        view.reviewing = (saved, view.reviewing[1] if view.reviewing else None)
+        move()
+        view.render_now()
+        assert view.reviewing is None  # a mask made from one camera is not shown from another
+        assert view.kept and view.points  # but the marks are held on the surface and follow
+    assert window.views == [saved] and saved.mask.any()  # the saved view itself is untouched
+    view.set_scene(GroundRenderer(), Orbit(np.zeros(3), 6., pitch=np.deg2rad(35.)))  # a new scene forgets it all
+    assert view.reviewing is None and not view.kept
+
+
+def test_esc_clears_what_was_just_added_from_the_screen_but_not_from_the_views(app):
+    window, view, fake = ground_window()
+    click(view, 200, 150, Qt.LeftButton)
+    window.add_view()
+    assert view.kept
+    window.undo_action.trigger()  # Backspace does not reach into a view that is already added
+    assert view.points == [(200, 150)] and view.kept
+    window.clear_action.trigger()  # Esc
+    assert view.points == [] and view.mask is None and not view.kept and len(window.views) == 1
+
+
+def fly_window():
+    window, view = ready_window(FakeSegmenter())
+    view.set_scene(FlakyRenderer(), Orbit(np.zeros(3), 6., pitch=np.deg2rad(20.)))
+    view.render_now()
+    return window, view
+
+
+def press_right(view):
+    view.mousePressEvent(mouse(QEvent.MouseButtonPress, 100, 80, Qt.RightButton))
+
+
+def release_right(view):
+    view.mouseReleaseEvent(mouse(QEvent.MouseButtonRelease, 100, 80, Qt.RightButton))
+
+
+def test_wasd_qe_walk_the_camera_only_while_the_right_button_is_down():
+    from PySide6.QtTest import QTest
+    window, view = fly_window()
+    eye = view.orbit.eye.copy()
+    forward = view.camera.world_to_camera[2, :3].copy()
+    right = view.camera.world_to_camera[0, :3].copy()
+    QTest.keyPress(view, Qt.Key_W)  # the right button is not down: nothing
+    view._fly_tick(.5)
+    assert np.allclose(view.orbit.eye, eye) and not view._fly_keys
+    press_right(view)
+    QTest.keyPress(view, Qt.Key_W)
+    view._fly_tick(.5)
+    step = .5 * 0.8 * 6.  # half a second at FLY_SPEED distances to the orbit centre per second
+    np.testing.assert_allclose(view.orbit.eye - eye, step * forward, atol=1e-9)  # W: ahead
+    QTest.keyRelease(view, Qt.Key_W)
+    QTest.keyPress(view, Qt.Key_D)
+    view._fly_tick(.5)
+    np.testing.assert_allclose(view.orbit.eye - eye - step * forward, step * right, atol=1e-9)  # D: to the right
+    QTest.keyRelease(view, Qt.Key_D)
+    before = view.orbit.eye.copy()
+    QTest.keyPress(view, Qt.Key_E)
+    view._fly_tick(.5)
+    QTest.keyPress(view, Qt.Key_Q)  # E and Q together cancel
+    view._fly_tick(.5)
+    assert abs((view.orbit.eye - before)[np.argmax(np.abs(view.orbit.up))]) < step * 1.01
+    release_right(view)
+    assert not view._flying and not view._fly_keys and not view._fly_timer.isActive()  # letting go stops it
+    QTest.keyPress(view, Qt.Key_W)
+    view._fly_tick(.5)
+    assert not view._fly_keys
+
+
+def test_s_walks_back_while_flying_instead_of_switching_select_mode():
+    from PySide6.QtCore import QEvent
+    from PySide6.QtGui import QKeyEvent
+    from PySide6.QtTest import QTest
+    window, view = fly_window()
+    view.setFocus()
+    eye = view.orbit.eye.copy()
+    forward = view.camera.world_to_camera[2, :3].copy()
+    press_right(view)
+    override = QKeyEvent(QEvent.ShortcutOverride, Qt.Key_S, Qt.NoModifier, "s")
+    override.ignore()
+    QApplication.sendEvent(QApplication.focusWidget(), override)  # what asks a widget whether it wants a key before a shortcut gets it
+    assert override.isAccepted()
+    QTest.keyPress(QApplication.focusWidget(), Qt.Key_S)  # the way a real key reaches the app: to the widget in focus
+    assert not view.selecting and not window.select_action.isChecked() and view._fly_keys == {Qt.Key_S}
+    view._fly_tick(.25)
+    np.testing.assert_allclose(view.orbit.eye - eye, -.25 * 0.8 * 6. * forward, atol=1e-9)  # S: back
+    QTest.keyRelease(QApplication.focusWidget(), Qt.Key_S)
+    release_right(view)
+    assert not view._flying
+    override = QKeyEvent(QEvent.ShortcutOverride, Qt.Key_S, Qt.NoModifier, "s")
+    override.ignore()
+    QApplication.sendEvent(QApplication.focusWidget(), override)  # the right button is up: the view lets S be the shortcut it always was
+    assert not override.isAccepted()
+    QTest.keyClick(QApplication.focusWidget(), Qt.Key_S)
+    assert window.select_action.isChecked() and view.selecting
+
+
+def test_shift_flies_faster_and_the_arrow_keys_do_the_same_as_wasd():
+    from PySide6.QtTest import QTest
+    window, view = fly_window()
+    eye = view.orbit.eye.copy()
+    press_right(view)
+    QTest.keyPress(view, Qt.Key_Up)
+    view._fly_tick(.5)
+    slow = np.linalg.norm(view.orbit.eye - eye)
+    QTest.keyRelease(view, Qt.Key_Up)
+    eye = view.orbit.eye.copy()
+    QTest.keyPress(view, Qt.Key_Up, Qt.ShiftModifier)
+    view._fly_tick(.5)
+    assert np.linalg.norm(view.orbit.eye - eye) == pytest.approx(3 * slow)
+    release_right(view)
+
+
+def test_a_right_click_still_marks_the_background_but_flying_with_it_held_is_not_a_click(app):
+    from PySide6.QtTest import QTest
+    fake = FakeSegmenter()
+    window, view, _ = ground_window()
+    click(view, 200, 150, Qt.LeftButton)
+    press_right(view)
+    QTest.keyPress(view, Qt.Key_W)
+    view._fly_tick(.1)
+    QTest.keyRelease(view, Qt.Key_W)
+    release_right(view)  # held to fly: releasing is not a click
+    assert view.labels == [1] or view.labels == []  # nothing new was marked
+    labels = list(view.labels)
+    view.render_now()
+    click(view, 260, 170, Qt.RightButton)  # a plain right click is still a background point
+    assert view.labels[-1] == 0 and len(view.labels) == len(labels) + 1
+
+
+def test_the_focus_being_lost_stops_a_walk_that_would_never_see_the_key_let_go():
+    from PySide6.QtGui import QFocusEvent
+    from PySide6.QtTest import QTest
+    window, view = fly_window()
+    press_right(view)
+    QTest.keyPress(view, Qt.Key_W)
+    assert view._fly_timer.isActive()
+    view.focusOutEvent(QFocusEvent(QEvent.FocusOut))
+    assert not view._flying and not view._fly_keys and not view._fly_timer.isActive()
+    release_right(view)

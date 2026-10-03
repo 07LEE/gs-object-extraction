@@ -172,3 +172,21 @@ def test_the_pitch_of_a_look_is_limited():
     assert abs(orbit.pitch) <= np.deg2rad(89.) + 1e-9
     orbit.look(0, -1e7)
     assert abs(orbit.pitch) <= np.deg2rad(89.) + 1e-9
+
+
+def test_walking_moves_the_camera_along_its_own_axes_and_turns_nothing():
+    orbit = Orbit(np.array([1., 2., 3.]), 4., yaw=.7, pitch=.3, up=(0, 0, 1))
+    camera = orbit.camera(100, 100)
+    right, forward = camera.world_to_camera[0, :3].copy(), camera.world_to_camera[2, :3].copy()
+    eye, distance, facing = orbit.eye.copy(), orbit.distance, (orbit.target - orbit.eye) / orbit.distance
+    orbit.walk(2., 0., 0.)
+    np.testing.assert_allclose(orbit.eye - eye, 2 * forward, atol=1e-9)  # ahead is where the camera looks
+    orbit.walk(0., 1.5, 0.)
+    np.testing.assert_allclose(orbit.eye - eye - 2 * forward, 1.5 * right, atol=1e-9)  # aside is its right
+    orbit.walk(0., 0., -.5)
+    np.testing.assert_allclose(orbit.eye[2] - eye[2], 2 * forward[2] + 1.5 * right[2] - .5, atol=1e-9)  # rise is along the world's up
+    assert orbit.distance == distance
+    np.testing.assert_allclose((orbit.target - orbit.eye) / orbit.distance, facing, atol=1e-9)  # it still faces the same way
+    back = orbit.eye.copy()
+    orbit.walk(-2., -1.5, .5)
+    np.testing.assert_allclose(orbit.eye, eye, atol=1e-9)
