@@ -130,6 +130,8 @@ def test_a_flagged_view_is_marked_in_the_list(app):
     view = marked_view()
     assert MainWindow.view_label(0, view) == f"View 1: {int(view.mask.sum()):,} px"
     assert MainWindow.view_label(2, replace(view, suspect=True)).endswith("px (check)")
+    assert MainWindow.view_label(0, view, unreviewed=True).endswith("px (review)")
+    assert MainWindow.view_label(0, replace(view, suspect=True), unreviewed=True).endswith("px (review) (check)")
 
 
 def test_the_candidate_closest_to_the_silhouette_wins():
@@ -289,6 +291,17 @@ def test_the_window_adds_the_marked_ring_to_its_views(app):
     assert window.stages is None  # the old result no longer matches the views
     assert "Marked" in window.statusBar().currentMessage()
     assert window.auto_button.isEnabled() and not window.progress.isVisible()
+
+    # Each automatic view has to be looked at before the object is extracted.
+    rows = range(1, 1 + VIEWS)
+    assert "(review)" not in window.view_list.item(0).text()  # the user's own view needs no look
+    assert all("(review)" in window.view_list.item(row).text() for row in rows)
+    assert not window.extract_action.isEnabled() and not window.extract_button.isEnabled()
+    window.viewport.orbit = Orbit((0., 0., 0.), 4.)  # a scene is on screen, so a view can be stood in
+    for row in rows:
+        window.review_view(row)
+        assert "(review)" not in window.view_list.item(row).text()
+    assert window.extract_action.isEnabled() and window.extract_button.isEnabled()
 
 
 def test_cancelling_stops_the_ring(app):
