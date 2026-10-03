@@ -10,13 +10,13 @@ from PySide6.QtWidgets import (QComboBox, QDockWidget, QDoubleSpinBox, QFileDial
 from ..extract import OFF_MASK, TRIM, trim_scales
 from .autoviews import AutoMarkJob, VIEWS
 from .pick import bounding_box, inside_box
-from .export import ExportDialog, ExportJob, ExportOptions
+from .export import ExportDialog, ExportJob
 from .extraction import ExtractionJob
 from .refining import RefineJob
 from .loading import SceneLoadJob, SegmenterLoadJob
 from .orbit import AXES, DEFAULT_UP, Orbit
 from .segmenter import DEFAULT_CHECKPOINT, Segmenter
-from .settings import load_folder, make_settings, save_folder
+from .settings import load_export_options, load_folder, make_settings, save_export_options, save_folder
 from .viewport import BACKGROUND, Viewport
 from .widgets import Choice, Collapsible
 from .views import MaskedView
@@ -55,7 +55,7 @@ class MainWindow(QMainWindow):
         self.refine_job = None
         self.auto_job = None
         self.export_job = None
-        self.export_options = ExportOptions()
+        self.export_options = load_export_options(self.settings)
         self.load_job = None
         self._shown_file = ("-", "")
         self._kept = None  # the open work, set aside while a new scene goes up
@@ -1032,6 +1032,7 @@ class MainWindow(QMainWindow):
         if not dialog.exec():
             return
         self.export_options = dialog.options()
+        save_export_options(self.settings, self.export_options)
         default = self.source_path.with_name(f"{self.source_path.stem}_object.ply") if self.source_path else Path("object.ply")
         dialog = QFileDialog(self, "Export object PLY", str(default.parent), "PLY files (*.ply)")
         dialog.setAcceptMode(QFileDialog.AcceptSave)

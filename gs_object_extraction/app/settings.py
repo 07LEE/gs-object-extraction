@@ -1,7 +1,8 @@
-"""What the viewer remembers between runs: the folder a scene was last opened from."""
+"""What the viewer remembers between runs: the folder a scene was last opened from and the export options."""
 
 from pathlib import Path
 from PySide6.QtCore import QSettings
+from .export import ExportOptions
 
 
 def make_settings():
@@ -16,4 +17,18 @@ def load_folder(settings):
 
 def save_folder(settings, folder):
     settings.setValue("folder", str(folder))
+    settings.sync()
+
+
+def load_export_options(settings):
+    degree = settings.value("export/sh_degree", 3, type=int)
+    return ExportOptions(upright=settings.value("export/upright", False, type=bool),
+                         ground=settings.value("export/ground", False, type=bool),
+                         sh_degree=min(max(degree, 0), 3))
+
+
+def save_export_options(settings, options):
+    settings.setValue("export/upright", options.upright)
+    settings.setValue("export/ground", options.ground)
+    settings.setValue("export/sh_degree", options.sh_degree)
     settings.sync()
