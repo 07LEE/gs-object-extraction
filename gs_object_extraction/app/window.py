@@ -491,6 +491,11 @@ class MainWindow(QMainWindow):
         if self.viewport.take_bigger():
             self.statusBar().showMessage(f"Mask is now {int(self.viewport.mask.sum()):,} px")
 
+    @staticmethod
+    def view_label(index, view):
+        """The line a marked view has in the list; an automatic view that looks off is asked to be checked."""
+        return f"View {index + 1}: {int(view.mask.sum()):,} px" + (" (check)" if view.suspect else "")
+
     def add_view(self):
         """Keep the mask on screen: as a new view, or in place of the marked view it corrects."""
         view = self.viewport
@@ -502,7 +507,7 @@ class MainWindow(QMainWindow):
             marked = MaskedView(self.views[editing].camera, view.mask.copy(), tuple(view.points), tuple(view.labels))
             self.invalidate_result()
             self.views[editing] = marked
-            self.view_list.item(editing).setText(f"View {editing + 1}: {int(marked.mask.sum()):,} px")
+            self.view_list.item(editing).setText(self.view_label(editing, marked))
             view.editing = None
             view.keep_marks(marked)  # the corrected view stays on screen
             self.update_extraction_state()
@@ -511,7 +516,7 @@ class MainWindow(QMainWindow):
         marked = MaskedView(view.camera, view.mask.copy(), tuple(view.points), tuple(view.labels))
         self.invalidate_result()
         self.views.append(marked)
-        self.view_list.addItem(f"View {len(self.views)}: {int(marked.mask.sum()):,} px")
+        self.view_list.addItem(self.view_label(len(self.views) - 1, marked))
         view.keep_marks(marked)  # it stays on screen, so what was just added can be seen while the camera moves
         self.update_extraction_state()
         self.statusBar().showMessage(f"{len(self.views)} view(s) marked")
@@ -538,7 +543,7 @@ class MainWindow(QMainWindow):
                 if self.views:
                     self.view_list.setCurrentRow(min(row, len(self.views) - 1))
             for i, marked in enumerate(self.views):
-                self.view_list.item(i).setText(f"View {i + 1}: {int(marked.mask.sum()):,} px")
+                self.view_list.item(i).setText(self.view_label(i, marked))
             if was_shown:
                 # The removed view's mask is still drawn over the frame: go on to the next view, or to a plain frame when none is left.
                 if self.views:
@@ -731,10 +736,11 @@ class MainWindow(QMainWindow):
     def auto_marked(self, marked, skipped):
         for view in marked:
             self.views.append(view)
-            self.view_list.addItem(f"View {len(self.views)}: {int(view.mask.sum()):,} px")
+            self.view_list.addItem(self.view_label(len(self.views) - 1, view))
         if marked:
             self.invalidate_result()
         missed = f", {skipped} view(s) could not be marked" if skipped else ""
+        missed += f", {sum(view.suspect for view in marked)} to check" if any(view.suspect for view in marked) else ""
         self.statusBar().showMessage(f"Marked {len(marked)} view(s) around the object{missed}"
                                      if marked else f"No view could be marked{missed}")
 

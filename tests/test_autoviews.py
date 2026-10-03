@@ -7,8 +7,8 @@ import pytest
 pytest.importorskip("PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
-from gs_object_extraction.app.autoviews import (AutoMarkJob, DISTANCE, MIN_AGREE, MIN_PIXELS, NEAR, VIEWS,
-                                                best_candidate, inner_part, object_frame, prompt_points, ring,
+from gs_object_extraction.app.autoviews import (AutoMarkJob, DEEP, DISTANCE, FLOOR, MIN_AGREE, MIN_PIXELS, NEAR, VIEWS,
+                                                above_floor, best_candidate, suspects, inner_part, object_frame, prompt_points, ring,
                                                 surface_points, usable)
 from gs_object_extraction.app.orbit import Orbit
 from gs_object_extraction.app.views import MaskedView
@@ -73,6 +73,17 @@ def test_surface_points_need_something_solid():
         surface_points(Empty(), [(CAMERA, np.ones(SIZE[::-1], bool))])
 
 
+def test_the_ground_under_the_object_is_dropped():
+    up = (0., 1., 0.)
+    surface = np.array([[x, y, 0.] for x in (-1., 1.) for y in (0., 1., 2.)])  # the marked surface, base at y = 0
+    centre, radius = np.array([0., 1., 0.]), 1.5
+    means = np.array([[0., 1., 0.],  # on the object
+                      [0., 0.05, 0.],  # ground level with the object's base
+                      [0., -0.5, 0.],  # below it
+                      [0., FLOOR * radius + 0.1, 0.]])  # just over the margin
+    np.testing.assert_array_equal(above_floor(means, surface, centre, radius, up), [True, False, False, True])
+
+
 def test_prompts_sit_inside_the_outline_and_spread_out():
     coverage = disk(SIZE[::-1], (24, 32), 15)
     points = prompt_points(coverage, count=3)
@@ -82,6 +93,15 @@ def test_prompts_sit_inside_the_outline_and_spread_out():
     assert inner.sum() < coverage.sum() and all(inner[y, x] for x, y in points)
     spread = max(abs(a[0] - b[0]) + abs(a[1] - b[1]) for a in points for b in points)
     assert spread > 10  # not three clicks on the same spot
+
+
+def test_a_big_silhouette_keeps_its_clicks_further_from_the_outline():
+    coverage = disk((480, 640), (240, 320), 200)
+    inner = inner_part(coverage)
+    ys, xs = np.nonzero(inner)
+    reach = 200 - np.sqrt((ys - 240) ** 2 + (xs - 320) ** 2).max()
+    assert reach > 2 * DEEP  # well past the fixed depth a small silhouette gets
+    assert all(coverage[y, x] for x, y in prompt_points(coverage))
 
 
 def test_prompts_avoid_a_hole_in_the_middle():
@@ -95,6 +115,21 @@ def test_prompts_survive_a_thin_silhouette():
     coverage[24, 10:54] = True  # one pixel tall: erosion would wipe it out
     points = prompt_points(coverage, count=3)
     assert all(coverage[y, x] for x, y in points)
+
+
+def test_a_view_far_below_the_others_is_flagged_to_check():
+    assert suspects([.6, .62, .58, .2, .61]) == [False, False, False, True, False]
+    assert suspects([.3, .31, .29, .3]) == [False] * 4  # all alike, whatever the level
+    assert suspects([.9, .1]) == [False, False]  # two views are not enough to say which is odd
+    assert suspects([]) == []
+
+
+def test_a_flagged_view_is_marked_in_the_list(app):
+    from gs_object_extraction.app.window import MainWindow
+    from dataclasses import replace
+    view = marked_view()
+    assert MainWindow.view_label(0, view) == f"View 1: {int(view.mask.sum()):,} px"
+    assert MainWindow.view_label(2, replace(view, suspect=True)).endswith("px (check)")
 
 
 def test_the_candidate_closest_to_the_silhouette_wins():
