@@ -16,6 +16,7 @@ from .refining import RefineJob
 from .loading import SceneLoadJob, SegmenterLoadJob
 from .orbit import AXES, DEFAULT_UP, Orbit
 from .segmenter import DEFAULT_CHECKPOINT, Segmenter
+from .settings import load_folder, make_settings, save_folder
 from .viewport import BACKGROUND, Viewport
 from .widgets import Choice, Collapsible
 from .views import MaskedView
@@ -35,8 +36,9 @@ DELETE_HISTORY = 20  # deletions that can be undone
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, checkpoint=DEFAULT_CHECKPOINT):
+    def __init__(self, checkpoint=DEFAULT_CHECKPOINT, settings=None):
         super().__init__()
+        self.settings = settings or make_settings()
         self.setWindowTitle(TITLE)
         self.resize(1280, 800)
         self.scene = None
@@ -307,7 +309,7 @@ class MainWindow(QMainWindow):
         return footer
 
     def choose_ply(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Open Gaussian PLY", "", "PLY files (*.ply)")
+        path, _ = QFileDialog.getOpenFileName(self, "Open Gaussian PLY", load_folder(self.settings), "PLY files (*.ply)")
         if path:
             self.open_ply(path)
 
@@ -378,6 +380,7 @@ class MainWindow(QMainWindow):
         self._kept = None
         self.scene = scene
         self.source_path = Path(self.load_job.path).resolve()
+        save_folder(self.settings, self.source_path.parent)
         self.count_label.setText(f"{len(scene.means):,}")
         self.auto_up = up
         self.scene_renderer = renderer
