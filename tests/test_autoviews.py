@@ -8,7 +8,7 @@ pytest.importorskip("PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
 from gs_object_extraction.app.autoviews import (AutoMarkJob, DEEP, DISTANCE, FLOOR, MIN_AGREE, MIN_PIXELS, NEAR, VIEWS,
-                                                above_floor, best_candidate, inner_part, object_frame, prompt_points, ring,
+                                                above_floor, best_candidate, suspects, inner_part, object_frame, prompt_points, ring,
                                                 surface_points, usable)
 from gs_object_extraction.app.orbit import Orbit
 from gs_object_extraction.app.views import MaskedView
@@ -115,6 +115,21 @@ def test_prompts_survive_a_thin_silhouette():
     coverage[24, 10:54] = True  # one pixel tall: erosion would wipe it out
     points = prompt_points(coverage, count=3)
     assert all(coverage[y, x] for x, y in points)
+
+
+def test_a_view_far_below_the_others_is_flagged_to_check():
+    assert suspects([.6, .62, .58, .2, .61]) == [False, False, False, True, False]
+    assert suspects([.3, .31, .29, .3]) == [False] * 4  # all alike, whatever the level
+    assert suspects([.9, .1]) == [False, False]  # two views are not enough to say which is odd
+    assert suspects([]) == []
+
+
+def test_a_flagged_view_is_marked_in_the_list(app):
+    from gs_object_extraction.app.window import MainWindow
+    from dataclasses import replace
+    view = marked_view()
+    assert MainWindow.view_label(0, view) == f"View 1: {int(view.mask.sum()):,} px"
+    assert MainWindow.view_label(2, replace(view, suspect=True)).endswith("px (check)")
 
 
 def test_the_candidate_closest_to_the_silhouette_wins():

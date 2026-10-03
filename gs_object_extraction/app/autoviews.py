@@ -6,6 +6,7 @@ prompt SAM2 needs, so the tool clicks for the user. The ring sits low: views fro
 high up are worse, because the ground behind the object falls inside its outline.
 """
 
+from dataclasses import replace
 import numpy as np
 from PySide6.QtCore import QThread, Signal
 from ..extract import lift_masks, select
@@ -25,6 +26,7 @@ NEAR = 1.5  # keep the selection within this many object radii when looking for 
 DEEP = 8  # click this far inside the outline where the silhouette is wide enough
 DEEP_FRACTION = .1  # ... or this fraction of the silhouette's size, if that is more: a big object's outline is loose
 MAX_FILL = .2  # back the ring off until the object takes at most this much of the frame
+SUSPECT = .75  # an automatic view whose agreement is under this share of the median is flagged for a look
 FLOOR = .15  # drop what sits below the object's base plus this many radii: the ground patch under it
 
 
@@ -149,6 +151,19 @@ def usable(mask, sits_on):
     return mask is not None and mask.any() and sits_on >= MIN_AGREE and mask.mean() <= MAX_FRAME
 
 
+def suspects(agreement, share=SUSPECT):
+    """Which of the views agree with the object far less than the rest, to flag for the user to check.
+
+    A mask is judged against the others, not against a fixed bar: how well a mask and the
+    silhouette overlap depends on the object (a painted machine reads as parts), but a view
+    that falls well below its neighbours is the odd one out. Too few views to compare flag nothing.
+    """
+    if len(agreement) < 3:
+        return [False] * len(agreement)
+    bar = share * float(np.median(agreement))
+    return [value < bar for value in agreement]
+
+
 class _Cancelled(Exception):
     pass
 
@@ -175,7 +190,7 @@ class AutoMarkJob(QThread):
 
     def run(self):
         try:
-            marked, skipped = [], 0
+            marked, agreement, skipped = [], [], 0
             run = object()  # keys this run's views apart from every earlier run's
             selection = select(lift_masks(self.renderer, self.views, on_view=self.check))
             if not selection.any():
@@ -207,9 +222,11 @@ class AutoMarkJob(QThread):
                     mask, sits_on = best_candidate(masks, silhouette)
                     if usable(mask, sits_on):
                         marked.append(MaskedView(camera, mask, tuple(points), (1,) * len(points)))
+                        agreement.append(float((mask & silhouette).sum() / max((mask | silhouette).sum(), 1)))
                     else:
                         skipped += 1
                 self.progress.emit(index + 1, self.count)
+            marked = [replace(view, suspect=flag) for view, flag in zip(marked, suspects(agreement))]
         except _Cancelled:
             self.cancelled.emit()
         except Exception as exc:
