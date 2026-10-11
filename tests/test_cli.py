@@ -81,6 +81,26 @@ def test_empty_held_out_masks_skip_the_preview_but_finish_the_output(fake_scene,
     assert len(load_ply(out / "object.ply").means) == 2
 
 
+@pytest.mark.parametrize("held", [[], [(None, np.zeros_like(MASK))]], ids=["no held-out views", "empty masks"])
+def test_rerun_without_a_preview_removes_the_one_from_the_earlier_run(fake_scene, monkeypatch, tmp_path, held):
+    monkeypatch.setattr(cli, "usid_views", lambda scene_dir, model_dir: (fake_scene, held))
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "preview.png").write_bytes(b"earlier run")
+    cli.extract_scene("s", "m", out, band=0)
+    assert not (out / "preview.png").exists()
+    assert (out / "object.ply").exists() and (out / "summary.json").exists()
+
+
+def test_rerun_with_a_preview_replaces_the_earlier_one(fake_scene, monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "preview", lambda *args: args[-1].write_bytes(b"current run"))
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "preview.png").write_bytes(b"earlier run")
+    cli.extract_scene("s", "m", out, band=0)
+    assert (out / "preview.png").read_bytes() == b"current run"
+
+
 def usid_scene(root, names):
     Image = pytest.importorskip("PIL.Image")
     from test_colmap_usid import write_cameras, write_images

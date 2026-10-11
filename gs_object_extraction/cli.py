@@ -55,7 +55,8 @@ def extract_scene(scene_dir, model_dir, output, **options):
     """Write ``object.ply``, ``summary.json`` and, when a held-out view shows the object, ``preview.png``; return the summary.
 
     Every output is replaced atomically, so re-running into an existing folder either
-    leaves the previous result or overwrites it completely.
+    leaves the previous result or overwrites it completely. A run that draws no preview
+    removes the one an earlier run left.
     """
     from .renderer import GsplatRenderer
     train, held = usid_views(scene_dir, model_dir)
@@ -72,6 +73,8 @@ def extract_scene(scene_dir, model_dir, output, **options):
     camera, mask = max(held, key=lambda view: np.count_nonzero(view[1]), default=(None, None))
     if mask is not None and mask.any():  # with no object in any held-out view there is nothing to crop around
         preview(renderer, camera, mask, stages["selected"], stages["cleaned"], output / "preview.png")
+    else:
+        (output / "preview.png").unlink(missing_ok=True)  # it would show an earlier run
     replace_atomically(output / "summary.json",
                        lambda stream: stream.write((json.dumps(summary, indent=1) + "\n").encode()))
     return summary
