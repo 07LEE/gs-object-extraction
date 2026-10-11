@@ -70,6 +70,17 @@ def test_default_band_is_used_for_scoring_too(fake_scene, tmp_path):
     assert summary["scores"]["cleaned"]["gaussians"] == 3
 
 
+def test_empty_held_out_masks_skip_the_preview_but_finish_the_output(fake_scene, monkeypatch, tmp_path):
+    drawn = []
+    monkeypatch.setattr(cli, "usid_views", lambda scene_dir, model_dir: (fake_scene, [(None, np.zeros_like(MASK))]))
+    monkeypatch.setattr(cli, "preview", lambda *args: drawn.append(args))
+    out = tmp_path / "out"
+    summary = cli.extract_scene("s", "m", out, band=0)
+    assert drawn == [] and summary["scoring_views"] == 1
+    assert json.loads((out / "summary.json").read_text())["scoring_views"] == 1
+    assert len(load_ply(out / "object.ply").means) == 2
+
+
 def usid_scene(root, names):
     Image = pytest.importorskip("PIL.Image")
     from test_colmap_usid import write_cameras, write_images
