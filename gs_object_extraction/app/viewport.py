@@ -82,6 +82,46 @@ def _mask_image(mask):
     return QImage(rgba.data, mask.shape[1], mask.shape[0], 4 * mask.shape[1], QImage.Format_RGBA8888).copy()
 
 
+def _view_to_frame(saved, frame):
+    """3 x 3 matrix taking a pixel of the camera ``saved`` to the pixel of ``frame`` that looks along the same ray.
+
+    A saved view is shown from where it was taken, so the two cameras share an eye and
+    differ only by a rotation (another up axis rolls the frame) and by their intrinsics
+    (a window of another shape or size). That is a homography, exact at any depth.
+    """
+    def intrinsics(camera):
+        return np.array([[camera.fx, 0, camera.cx], [0, camera.fy, camera.cy], [0, 0, 1.]])
+
+    rotation = frame.world_to_camera[:3, :3] @ saved.world_to_camera[:3, :3].T
+    return intrinsics(frame) @ rotation @ np.linalg.inv(intrinsics(saved))
+
+
+def _stretch(saved, frame):
+    """What drawing an image of ``saved``'s size over ``frame``'s whole area does to a pixel, as ``_view_to_frame`` does."""
+    sx, sy = frame.width / saved.width, frame.height / saved.height
+    return np.array([[sx, 0, (sx - 1) / 2], [0, sy, (sy - 1) / 2], [0, 0, 1.]])
+
+
+def _warp_mask(mask, matrix, shape, strip=64):
+    """``mask`` seen through ``matrix`` (saved pixel to frame pixel) on a frame of ``shape``; what falls outside the mask's image is empty.
+
+    The frame is worked a strip of rows at a time, so the temporaries stay small on a large window.
+    """
+    height, width = shape
+    (a, b, c), (d, e, f), (g, h, i) = np.linalg.inv(matrix)  # a frame pixel (x, y) came from ((a x + b y + c) / w, (d x + e y + f) / w), w = g x + h y + i
+    xs = np.arange(width, dtype=float)
+    warped = np.zeros((height, width), bool)
+    for top in range(0, height, strip):
+        ys = np.arange(top, min(top + strip, height), dtype=float)[:, None]
+        w = g * xs + h * ys + i
+        with np.errstate(divide="ignore", invalid="ignore"):
+            sx, sy = np.rint((a * xs + b * ys + c) / w), np.rint((d * xs + e * ys + f) / w)
+        inside = (w > 0) & (sx >= 0) & (sx < mask.shape[1]) & (sy >= 0) & (sy < mask.shape[0])
+        rows = warped[top:top + len(ys)]
+        rows[inside] = mask[sy[inside].astype(int), sx[inside].astype(int)]
+    return warped
+
+
 def _icon(draw, size=22):
     """An icon drawn in white (or as ``draw`` chooses) rather than loaded, so there is no file to ship."""
     pixmap = QPixmap(size, size)
@@ -369,6 +409,8 @@ class Viewport(QWidget):
     def show_view(self, view):
         """Stand where a marked view was taken and draw its mask and points over the frame.
 
+        The frame is the viewer's own: its up axis and the window's shape, not the saved
+        camera's. The mask and points are carried onto it along the rays they were made on.
         Moving the camera afterwards, or resizing the widget, puts the frame back to a plain one.
         """
         if self.orbit is None or self.renderer is None:
@@ -378,14 +420,32 @@ class Viewport(QWidget):
         self.orbit.fov_y = float(np.rad2deg(2 * np.arctan(camera.height / 2 / camera.fy)))
         self.orbit.look_from(camera.eye, camera.eye + forward * self.orbit.distance)
         self.view_changed()
-        self.reviewing = (view, _mask_image(view.mask))
+        coming = self.orbit.camera(*self._frame_size())  # the frame the next render draws
+        matrix = _view_to_frame(camera, coming)
+        if np.allclose(matrix, _stretch(camera, coming), atol=1e-6):  # the window's shape and up axis are the saved ones
+            mask = view.mask
+        else:
+            mask = _warp_mask(view.mask, matrix, (coming.height, coming.width))
+        self.reviewing = (view, _mask_image(mask))
         return True
+
+    def _frame_size(self):
+        ratio = self.devicePixelRatioF()
+        return max(int(self.width() * ratio), 1), max(int(self.height() * ratio), 1)
+
+    def _review_marks(self, view):
+        """The marks of a saved view as pixels of the frame on screen, with their labels; the ones that fall off the frame are left out."""
+        points = np.array(view.points, dtype=float).reshape(-1, 2)
+        moved = _view_to_frame(view.camera, self.camera) @ np.vstack([points.T, np.ones(len(points))])
+        with np.errstate(divide="ignore", invalid="ignore"):
+            x, y = moved[0] / moved[2], moved[1] / moved[2]
+        on = (moved[2] > 0) & (x > -.5) & (x < self.camera.width - .5) & (y > -.5) & (y < self.camera.height - .5)
+        return [(float(a), float(b)) for a, b in zip(x[on], y[on])], [mark for mark, kept in zip(view.labels, on) if kept]
 
     def render_now(self):
         if self.renderer is None or self.orbit is None:
             return
-        ratio = self.devicePixelRatioF()
-        width, height = max(int(self.width() * ratio), 1), max(int(self.height() * ratio), 1)
+        width, height = self._frame_size()
         start = time.perf_counter()
         camera = self.orbit.camera(width, height)
         try:
@@ -445,7 +505,8 @@ class Viewport(QWidget):
             self._anchors, self.editing, self.kept = [], None, False
         elif self.reviewing is not None:
             self.editing = self.reviewing[0]
-            self._anchors = [self._anchor(point, mark, depth) for point, mark in zip(self.editing.points, self.editing.labels)]
+            points, labels = self._review_marks(self.editing)  # the frame on screen is not necessarily the saved camera's
+            self._anchors = [self._anchor((int(round(x)), int(round(y))), mark, depth) for (x, y), mark in zip(points, labels)]
         self.reviewing = None
         self._anchors.append(self._anchor(self._to_pixels(x, y), label, depth))
         self._sync_prompts()
@@ -652,11 +713,12 @@ class Viewport(QWidget):
             painter.drawImage(self.rect(), self._highlight_dots())
         if self._overlay is not None:
             painter.drawImage(self.rect(), self._overlay)
-        if self.reviewing is not None:
+        if self.reviewing is not None and self.camera is not None:  # the saved mask is laid for the frame being drawn, not for the old one
             view, overlay = self.reviewing
             painter.drawImage(self.rect(), overlay)
             if not self.points:  # a view just added has its marks held as anchors, drawn below
-                self._draw_points(painter, view.points, view.labels, view.camera.width)
+                points, labels = self._review_marks(view)
+                self._draw_points(painter, points, labels, self.camera.width)
         if self.points and self.camera is not None:  # while the camera moves the marks wait for the frame they belong on
             self._draw_points(painter, self.points, self.labels, self.camera.width)
         if self._box is not None:

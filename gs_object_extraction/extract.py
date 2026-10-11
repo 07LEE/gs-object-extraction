@@ -104,12 +104,16 @@ def score(renderer, views, selected, *, band=BAND):
     """Object-only alpha against masks, per mask pixel, band ignored.
 
     ``dirt`` is alpha outside the mask and ``missing`` the alpha deficit inside.
+    A view whose mask is empty has no object to measure against, so it is left out;
+    with no other view both are None.
     """
     dirt, missing = [], []
     for camera, mask in views:
+        if not np.any(mask):
+            continue
         labels = band_labels(mask, band)
         alpha = np.clip(renderer.render(camera, active=selected).alpha, 0, 1)
-        area = max(int(np.count_nonzero(mask)), 1)
+        area = int(np.count_nonzero(mask))
         dirt.append(float(alpha[labels == 0].sum() / area))
         missing.append(float((1 - alpha)[labels == 1].sum() / area))
     return {"gaussians": int(selected.sum()), "dirt": float(np.mean(dirt)) if dirt else None,

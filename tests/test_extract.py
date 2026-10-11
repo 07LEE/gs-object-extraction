@@ -58,6 +58,16 @@ def test_extract_prunes_junk_that_only_shows_once_the_scene_is_left_out():
     assert after == {"gaussians": 2, "dirt": 0., "missing": 0.}
 
 
+def test_score_leaves_out_views_without_the_object_instead_of_measuring_the_whole_frame():
+    renderer, selected = FakeRenderer(), np.array([True, True, False, True, False])
+    empty = np.zeros_like(MASK)
+    alone = score(renderer, [(None, MASK)], selected, band=0)
+    assert alone == {"gaussians": 3, "dirt": 1 / 3, "missing": 0.}
+    # An empty mask would count every drawn pixel as dirt, divided by an area of one.
+    assert score(renderer, [(None, MASK), (None, empty)], selected, band=0) == alone
+    assert score(renderer, [(None, empty), (None, empty)], selected, band=0) == {"gaussians": 3, "dirt": None, "missing": None}
+
+
 def test_band_labels_ignore_pixels_within_band_of_the_other_side_only():
     mask = np.zeros((12, 14), bool)
     mask[3:9, 4:10] = True

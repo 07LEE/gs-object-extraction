@@ -20,6 +20,15 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Check the tag is on the default branch
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" "origin/$DEFAULT_BRANCH"; then
+            echo "Tag $GITHUB_REF_NAME is not on $DEFAULT_BRANCH. Merge to $DEFAULT_BRANCH and tag there." >&2
+            exit 1
+          fi
+
       - name: Check the tag matches the project version
         run: |
           version=$(sed -n 's/^version = "\([0-9.]*\)"$/\1/p' pyproject.toml | head -n 1)

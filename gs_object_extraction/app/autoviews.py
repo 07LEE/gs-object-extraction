@@ -6,6 +6,7 @@ prompt SAM2 needs, so the tool clicks for the user. The ring sits low: views fro
 high up are worse, because the ground behind the object falls inside its outline.
 """
 
+from dataclasses import replace
 import numpy as np
 from PySide6.QtCore import QThread, Signal
 from ..extract import lift_masks, select
@@ -23,7 +24,10 @@ MAX_FRAME = .6  # ... and must not swallow the frame
 POINTS = 3  # clicks spread over the silhouette
 NEAR = 1.5  # keep the selection within this many object radii when looking for the object on screen
 DEEP = 8  # click this far inside the outline where the silhouette is wide enough
+DEEP_FRACTION = .1  # ... or this fraction of the silhouette's size, if that is more: a big object's outline is loose
 MAX_FILL = .2  # back the ring off until the object takes at most this much of the frame
+SUSPECT = .75  # an automatic view whose agreement is under this share of the median is flagged for a look
+FLOOR = .15  # drop what sits below the object's base plus this many radii: the ground patch under it
 
 
 def surface_points(renderer, views, step=4, on_view=None):
@@ -59,6 +63,18 @@ def object_frame(points):
     return centre, max(radius, 1e-6)
 
 
+def above_floor(means, surface, centre, radius, up, margin=FLOOR):
+    """Which Gaussians sit above the object's base, a little more than the surface the user marked reaches.
+
+    A selection lifted from one view takes in the ground patch under the object, and a
+    silhouette that holds it sends clicks onto the ground. The marked surface says how low
+    the object goes; the ground is at or below that.
+    """
+    up = np.asarray(up, dtype=float)
+    base = float(np.percentile((np.asarray(surface) - centre) @ up, 2))
+    return (np.asarray(means) - centre) @ up > base + margin * radius
+
+
 def ring(centre, radius, up, *, count=VIEWS, pitch=PITCH, distance=DISTANCE):
     """Evenly spaced orbits around the object at one low elevation."""
     if count < 1:
@@ -68,12 +84,23 @@ def ring(centre, radius, up, *, count=VIEWS, pitch=PITCH, distance=DISTANCE):
 
 
 def inner_part(coverage, depth=DEEP):
-    """The silhouette away from its outline, as deep as it survives being eaten in."""
+    """The silhouette away from its outline, as deep as it survives being eaten in.
+
+    The outline of a silhouette built from Gaussians is loose, more so the bigger the object
+    is on screen, so how far in it goes grows with the silhouette. A big one is eaten on a
+    coarser grid, which is as exact as clicks need and keeps this quick.
+    """
+    depth = max(depth, int(DEEP_FRACTION * np.sqrt(coverage.sum())))
+    step = max(1, depth // 8)
+    small = coverage[::step, ::step]
     for radius in (depth, depth // 2, depth // 4):
+        radius //= step
         if radius >= 1:
-            eroded = coverage & ~disk_dilate(~coverage, radius)
-            if eroded.sum() >= MIN_PIXELS:
-                return eroded
+            eroded = small & ~disk_dilate(~small, radius)
+            if eroded.sum() * step * step >= MIN_PIXELS:
+                inner = np.zeros_like(coverage)
+                inner[::step, ::step] = eroded
+                return inner
     return coverage
 
 
@@ -124,6 +151,19 @@ def usable(mask, sits_on):
     return mask is not None and mask.any() and sits_on >= MIN_AGREE and mask.mean() <= MAX_FRAME
 
 
+def suspects(agreement, share=SUSPECT):
+    """Which of the views agree with the object far less than the rest, to flag for the user to check.
+
+    A mask is judged against the others, not against a fixed bar: how well a mask and the
+    silhouette overlap depends on the object (a painted machine reads as parts), but a view
+    that falls well below its neighbours is the odd one out. Too few views to compare flag nothing.
+    """
+    if len(agreement) < 3:
+        return [False] * len(agreement)
+    bar = share * float(np.median(agreement))
+    return [value < bar for value in agreement]
+
+
 class _Cancelled(Exception):
     pass
 
@@ -150,15 +190,17 @@ class AutoMarkJob(QThread):
 
     def run(self):
         try:
-            marked, skipped = [], 0
+            marked, agreement, skipped = [], [], 0
             run = object()  # keys this run's views apart from every earlier run's
             selection = select(lift_masks(self.renderer, self.views, on_view=self.check))
             if not selection.any():
                 raise ValueError("The marked views do not select any Gaussian yet. Mark the object more closely first.")
-            centre, radius = object_frame(surface_points(self.renderer, self.views, on_view=self.check))
+            surface = surface_points(self.renderer, self.views, on_view=self.check)
+            centre, radius = object_frame(surface)
             # A selection lifted from one view trails off behind the object; only what sits
-            # around the object says where it lands on screen.
+            # around the object, and above the ground it stands on, says where it lands on screen.
             near = selection & (np.linalg.norm(np.asarray(self.means) - centre, axis=1) <= NEAR * radius)
+            near &= above_floor(self.means, surface, centre, radius, self.up)
             if not near.any():
                 raise ValueError("The marked views select nothing near the object.")
             width, height = self.size
@@ -180,9 +222,11 @@ class AutoMarkJob(QThread):
                     mask, sits_on = best_candidate(masks, silhouette)
                     if usable(mask, sits_on):
                         marked.append(MaskedView(camera, mask, tuple(points), (1,) * len(points)))
+                        agreement.append(float((mask & silhouette).sum() / max((mask | silhouette).sum(), 1)))
                     else:
                         skipped += 1
                 self.progress.emit(index + 1, self.count)
+            marked = [replace(view, suspect=flag) for view, flag in zip(marked, suspects(agreement))]
         except _Cancelled:
             self.cancelled.emit()
         except Exception as exc:

@@ -116,14 +116,19 @@ class Orbit:
         self.distance = max(self.distance * factor ** steps, 1e-6)
 
     def look_from(self, eye, target):
-        """Put the orbit centre on ``target`` without moving the camera."""
+        """Put the orbit centre on ``target`` without moving the camera.
+
+        Within a degree of the up axis the pitch limit leaves the camera where it is and
+        puts the centre a little short of ``target``, along the way the camera looks.
+        """
         u, e1, e2 = self._basis()
-        offset = np.asarray(eye, dtype=float) - np.asarray(target, dtype=float)
+        eye = np.asarray(eye, dtype=float)
+        offset = eye - np.asarray(target, dtype=float)
         self.distance = max(float(np.linalg.norm(offset)), 1e-6)
         d = offset / self.distance
-        self.target = np.asarray(target, dtype=float)
         self.pitch = float(np.clip(np.arcsin(np.clip(d @ u, -1, 1)), -PITCH_LIMIT, PITCH_LIMIT))
         self.yaw = float(np.arctan2(d @ e2, d @ e1))
+        self.target = eye - self.distance * self._direction()
 
     def set_up(self, up):
         """New up vector, keeping the camera where it is."""

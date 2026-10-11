@@ -8,6 +8,7 @@ Graphdeco training ignores the principal point and assumes the image centre;
 """
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 import struct
 import numpy as np
@@ -49,6 +50,13 @@ def _read(stream, size):
     return data
 
 
+def _skip(stream, size, end):
+    """Seeking past the end of a file succeeds silently, so check the length first."""
+    if stream.tell() + size > end:
+        raise ValueError(f"{Path(stream.name).name} is truncated")
+    stream.seek(size, 1)
+
+
 def read_cameras_binary(path):
     cameras = {}
     with Path(path).open("rb") as f:
@@ -65,12 +73,13 @@ def read_images_binary(path):
     """Registered images keyed by file name; 2D keypoints are skipped."""
     images = {}
     with Path(path).open("rb") as f:
+        end = os.fstat(f.fileno()).st_size
         for _ in range(struct.unpack("<Q", _read(f, 8))[0]):
             image_id, *pose, camera_id = struct.unpack("<i7di", _read(f, 64))
             name = bytearray()
             while (byte := _read(f, 1)) != b"\0":
                 name += byte
-            f.seek(24 * struct.unpack("<Q", _read(f, 8))[0], 1)
+            _skip(f, 24 * struct.unpack("<Q", _read(f, 8))[0], end)
             image = ColmapImage(image_id, name.decode(), tuple(pose[:4]), tuple(pose[4:]), camera_id)
             images[image.name] = image
     return images

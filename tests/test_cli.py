@@ -70,6 +70,47 @@ def test_default_band_is_used_for_scoring_too(fake_scene, tmp_path):
     assert summary["scores"]["cleaned"]["gaussians"] == 3
 
 
+def test_empty_held_out_masks_skip_the_preview_but_finish_the_output(fake_scene, monkeypatch, tmp_path):
+    drawn = []
+    monkeypatch.setattr(cli, "usid_views", lambda scene_dir, model_dir: (fake_scene, [(None, np.zeros_like(MASK))]))
+    monkeypatch.setattr(cli, "preview", lambda *args: drawn.append(args))
+    out = tmp_path / "out"
+    summary = cli.extract_scene("s", "m", out, band=0)
+    assert drawn == [] and summary["scoring_views"] == 0 and summary["scores"] is None  # nothing was scored, so no score is made up
+    written = json.loads((out / "summary.json").read_text())
+    assert written["scoring_views"] == 0 and written["scores"] is None
+    assert len(load_ply(out / "object.ply").means) == 2
+
+
+def test_a_held_out_view_without_the_object_is_neither_scored_nor_counted(fake_scene, monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "usid_views", lambda scene_dir, model_dir: (fake_scene, [(None, MASK), (None, np.zeros_like(MASK))]))
+    out = tmp_path / "out"
+    summary = cli.extract_scene("s", "m", out, band=0)
+    assert summary["scoring_views"] == 1  # of two held out
+    assert summary["scores"]["selected"] == {"gaussians": 3, "dirt": 1 / 3, "missing": 0.0}  # as with the one view alone
+    assert summary["scores"]["cleaned"] == {"gaussians": 2, "dirt": 0.0, "missing": 0.0}
+
+
+@pytest.mark.parametrize("held", [[], [(None, np.zeros_like(MASK))]], ids=["no held-out views", "empty masks"])
+def test_rerun_without_a_preview_removes_the_one_from_the_earlier_run(fake_scene, monkeypatch, tmp_path, held):
+    monkeypatch.setattr(cli, "usid_views", lambda scene_dir, model_dir: (fake_scene, held))
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "preview.png").write_bytes(b"earlier run")
+    cli.extract_scene("s", "m", out, band=0)
+    assert not (out / "preview.png").exists()
+    assert (out / "object.ply").exists() and (out / "summary.json").exists()
+
+
+def test_rerun_with_a_preview_replaces_the_earlier_one(fake_scene, monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "preview", lambda *args: args[-1].write_bytes(b"current run"))
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "preview.png").write_bytes(b"earlier run")
+    cli.extract_scene("s", "m", out, band=0)
+    assert (out / "preview.png").read_bytes() == b"current run"
+
+
 def usid_scene(root, names):
     Image = pytest.importorskip("PIL.Image")
     from test_colmap_usid import write_cameras, write_images

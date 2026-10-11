@@ -123,6 +123,11 @@ class GaussianScene:
                                     self.sh[index], self.ids[index],
                                     {key: value[index] for key, value in self.extras.items()})
 
+    def with_sh_degree(self, degree: int) -> "GaussianScene":
+        """A copy keeping only the SH terms up to ``degree``; a scene with fewer already is copied as it is."""
+        return GaussianScene(self.means, self.scales, self.quaternions, self.opacities,
+                             self.sh[:, :(degree + 1) ** 2], self.ids, self.extras)
+
     @property
     def covariances(self) -> np.ndarray:
         """World-space covariance ``R @ diag(scales**2) @ R.T``."""

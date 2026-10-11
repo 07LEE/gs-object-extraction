@@ -11,6 +11,7 @@ class MaskedView:
     mask: np.ndarray  # bool, camera.height x camera.width
     points: tuple  # (x, y) pixel prompts on the rendered view
     labels: tuple  # 1 object, 0 background
+    suspect: bool = False  # an automatic view whose mask agrees with the object far less than the others do
 
     def __post_init__(self):
         if self.mask.shape != (self.camera.height, self.camera.width) or self.mask.dtype != np.bool_:
