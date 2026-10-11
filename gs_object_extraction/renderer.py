@@ -50,11 +50,26 @@ class Exclusive:
     The buffers are read-only while drawing, but a background job and the window reach
     for the same renderer, and they share its screen-space buffer and the default CUDA
     stream. Calls are handed out one at a time; the window asks without blocking, so
-    its event loop never queues behind a lift.
+    its event loop never queues behind a lift. A job made of many calls lets go of the
+    renderer between them and calls ``give_way``, so a window turned away gets its turn.
     """
 
     def __init__(self):
         self._lock = threading.RLock()
+        self._served = threading.Event()  # clear from a refusal until the refused caller is let in
+        self._served.set()
+
+    def give_way(self, wait=.05):
+        """For a long job between two of its calls: stay off the renderer until the caller just turned away has had its turn.
+
+        Letting go of the lock is not enough: the job takes it again within microseconds,
+        long before a window that asks every few milliseconds comes round. This waits
+        at most ``wait`` seconds, and once per refusal, so a caller that never comes
+        back (a click that is not retried) is not waited for again.
+        """
+        if not self._served.is_set():
+            self._served.wait(wait)
+            self._served.set()
 
     @contextlib.contextmanager
     def held(self, *, blocking=True):
@@ -65,6 +80,7 @@ class Exclusive:
         skips that frame rather than stall its event loop.
         """
         obtained = self._lock.acquire(blocking)
+        (self._served.set if obtained else self._served.clear)()
         try:
             yield obtained
         finally:
@@ -220,13 +236,18 @@ class GsplatRenderer(Exclusive):
 
         ``lift_masks`` uses this when a renderer offers it; the summed result matches
         calling ``lift`` per view and adding the results, within float32's rounding.
+
+        The renderer is held one view at a time and given way on between views, so the
+        window can draw while a round runs. The accumulator is this call's own, so
+        nothing between two views can touch it; nothing may change the renderer's
+        Gaussians while a round runs (the window does not while a job is working).
         """
         from .masks import band_labels
         torch = self.torch
         accumulator = torch.zeros((self.n, 3), dtype=torch.float32, device="cuda")
-        with self._lock:
-            for camera, mask in views:
-                labels = validate_labels(band_labels(mask, band), (camera.height, camera.width))
+        for camera, mask in views:
+            labels = validate_labels(band_labels(mask, band), (camera.height, camera.width))
+            with self._lock:
                 features = torch.zeros_like(self.means, requires_grad=True)
                 with torch.enable_grad():
                     image, _ = self._rasterize(camera, features=features, active=active)
@@ -238,8 +259,10 @@ class GsplatRenderer(Exclusive):
                 if not bool(torch.isfinite(grad).all()) or float(grad.min()) < -1e-5:
                     raise RuntimeError("lifting produced invalid contribution sums")
                 accumulator += grad
-                if on_view is not None:
-                    on_view()
+            if on_view is not None:
+                on_view()
+            self.give_way()
+        with self._lock:  # the pinned buffer is shared with ``lift``
             self._lifted.copy_(accumulator, non_blocking=True)
             torch.cuda.synchronize()
             values = self._lifted.numpy().copy()
