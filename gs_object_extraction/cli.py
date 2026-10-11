@@ -54,9 +54,10 @@ def preview(renderer, camera, mask, before, after, path):
 def extract_scene(scene_dir, model_dir, output, **options):
     """Write ``object.ply``, ``summary.json`` and, when a held-out view shows the object, ``preview.png``; return the summary.
 
-    Every output is replaced atomically, so re-running into an existing folder either
-    leaves the previous result or overwrites it completely. A run that draws no preview
-    removes the one an earlier run left.
+    Each file is replaced atomically, so none is ever half written. The files are written
+    one after another, ``summary.json`` last, so a run that fails part way can leave files
+    of an earlier run beside the new ones. A run that draws no preview removes the one an
+    earlier run left.
     """
     from .renderer import GsplatRenderer
     train, held = usid_views(scene_dir, model_dir)
