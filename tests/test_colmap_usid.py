@@ -110,13 +110,20 @@ def within(seconds, fn):
     return outcome
 
 
-@pytest.mark.parametrize("cut", ["name", "keypoint count"])
-def test_truncated_images_file_raises_instead_of_hanging(tmp_path, cut):
-    record = struct.pack("<Q", 1) + struct.pack("<i7di", 1, 1, 0, 0, 0, 0, 0, 0, 1)
-    record += b"00000.jp" if cut == "name" else b"00000.jpg\0" + b"\1\0\0"
+@pytest.mark.parametrize("tail", [b"00000.jp", b"00000.jpg\0" + b"\1\0\0",
+                                  b"00000.jpg\0" + struct.pack("<Q", 1),
+                                  b"00000.jpg\0" + struct.pack("<Q", 1) + b"\1" * 23],
+                         ids=["name", "keypoint count", "point data", "partial point data"])
+def test_truncated_images_file_raises_instead_of_hanging(tmp_path, tail):
+    record = struct.pack("<Q", 1) + struct.pack("<i7di", 1, 1, 0, 0, 0, 0, 0, 0, 1) + tail
     (tmp_path / "images.bin").write_bytes(record)
     outcome = within(5, lambda: read_images_binary(tmp_path / "images.bin"))
     assert isinstance(outcome.get("error"), ValueError) and "truncated" in str(outcome["error"])
+
+
+def test_final_record_whose_points_end_at_end_of_file_is_read(tmp_path):
+    write_images(tmp_path / "images.bin", [(1, (1, 0, 0, 0), (0, 0, 0), 1, "00000.jpg", 3)])
+    assert set(read_images_binary(tmp_path / "images.bin")) == {"00000.jpg"}
 
 
 def test_truncated_cameras_file_raises(tmp_path):
