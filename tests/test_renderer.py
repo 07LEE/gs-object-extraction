@@ -32,6 +32,42 @@ def test_a_held_renderer_turns_away_a_caller_that_will_not_wait():
     assert refused == [False, True]
 
 
+def test_a_job_gives_way_to_the_caller_it_turned_away_and_waits_for_it_only_once():
+    import threading
+    import time
+    exclusive = Exclusive()
+    started = time.perf_counter()
+    exclusive.give_way(wait=5)  # nobody was turned away
+    assert time.perf_counter() - started < 1
+
+    def ask(turns):
+        with exclusive.held(blocking=False) as obtained:
+            turns.append(obtained)
+
+    def ask_from_another_thread(turns):
+        thread = threading.Thread(target=ask, args=(turns,))
+        thread.start()
+        thread.join(5)
+
+    refused, served = [], []
+    with exclusive.held():  # the job is on the renderer, so the window is turned away ...
+        ask_from_another_thread(refused)
+    window = threading.Thread(target=lambda: (time.sleep(.05), ask(served)))  # ... and comes back a moment later
+    window.start()
+    started = time.perf_counter()
+    exclusive.give_way(wait=5)  # the job stays off until the window has been in
+    waited = time.perf_counter() - started
+    window.join(5)
+    assert refused == [False] and served == [True] and .04 < waited < 4
+
+    with exclusive.held():
+        ask_from_another_thread(refused)  # turned away again, and this caller never comes back
+    exclusive.give_way(wait=.05)
+    started = time.perf_counter()
+    exclusive.give_way(wait=5)  # waited for once, not at every call after
+    assert time.perf_counter() - started < 1
+
+
 def test_holding_a_renderer_nests_so_its_own_calls_still_work():
     exclusive = Exclusive()
     with exclusive.held() as outer, exclusive.held(blocking=False) as inner:
@@ -169,6 +205,79 @@ def test_lift_batch_matches_summing_individual_lifts():
     renderer.lift_batch(views, on_view=lambda: calls.append(1))
     assert calls == [1, 1]  # once per view, not once per round
 
+
+
+@cuda
+def test_lift_batch_lets_another_thread_in_between_views_and_keeps_the_sum():
+    import threading
+    renderer, camera = three_gaussians()
+    masks = [np.zeros((24, 24), bool) for _ in range(3)]
+    for mask, rows in zip(masks, (slice(8, 14), slice(14, 19), slice(4, 10))):
+        mask[rows, 8:16] = True
+    views = [(camera, mask) for mask in masks]
+    from gs_object_extraction.masks import band_labels
+    from gs_object_extraction.renderer import Lifted
+    reference = Lifted.zeros(3)
+    for mask in masks:
+        reference += renderer.lift(camera, band_labels(mask, 0))
+    turns = []
+
+    def window():  # a thread, since the lock is the job's own thread's to re-enter
+        def ask():
+            with renderer.held(blocking=False) as obtained:
+                turns.append(obtained)
+        thread = threading.Thread(target=ask)
+        thread.start()
+        thread.join(5)
+
+    batched = renderer.lift_batch(views, on_view=window)
+    assert turns == [True, True, True]  # the renderer is free after each view, not only after the round
+    np.testing.assert_allclose(batched.inside, reference.inside, rtol=1e-4, atol=1e-6)
+    np.testing.assert_allclose(batched.outside, reference.outside, rtol=1e-4, atol=1e-6)
+
+
+@cuda
+def test_lift_batch_waits_for_a_window_that_was_turned_away_during_a_view():
+    import threading
+    import time
+    renderer, camera = three_gaussians()
+    mask = np.zeros((24, 24), bool)
+    mask[8:14, 8:14] = True
+    views = [(camera, mask)] * 4
+    begun, turns, windows = [], [], []
+    real = renderer._rasterize
+
+    def window():  # draws a frame the way the viewport does: asks without waiting, asks again until it is in
+        while True:
+            with renderer.held(blocking=False) as obtained:
+                if obtained:
+                    turns.append(len(begun))  # read while holding the renderer: the job cannot begin another view
+                    return
+            time.sleep(.001)
+
+    def rasterize(*args, **kwargs):
+        begun.append(1)
+        if len(begun) == 1:  # the job is on the renderer: a window asking now is turned away
+            refused = []
+
+            def ask():
+                with renderer.held(blocking=False) as obtained:
+                    refused.append(obtained)
+            thread = threading.Thread(target=ask)
+            thread.start()
+            thread.join(5)
+            assert refused == [False]
+            windows.append(threading.Thread(target=window))
+            windows[0].start()
+        return real(*args, **kwargs)
+
+    renderer._rasterize = rasterize
+    try:
+        renderer.lift_batch(views)
+    finally:
+        del renderer._rasterize
+    windows[0].join(5)
+    assert turns == [1]  # in after the first view, before the second began
 
 
 @cuda
