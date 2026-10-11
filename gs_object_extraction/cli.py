@@ -66,10 +66,11 @@ def extract_scene(scene_dir, model_dir, output, **options):
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
     save_ply(scene.subset(stages["cleaned"]), output / "object.ply")
+    scored = sum(1 for _, mask in held if mask.any())  # a held-out view without the object has nothing to score against
     summary = {"scene_dir": str(scene_dir), "model_dir": str(model_dir), "options": options,
-               "extraction_views": len(train), "scoring_views": len(held),
+               "extraction_views": len(train), "scoring_views": scored,
                "scores": {name: ex.score(renderer, held, s, band=options.get("band", ex.BAND)) for name, s in stages.items() if name in ("selected", "cleaned")}
-               if held else None}
+               if scored else None}
     camera, mask = max(held, key=lambda view: np.count_nonzero(view[1]), default=(None, None))
     if mask is not None and mask.any():  # with no object in any held-out view there is nothing to crop around
         preview(renderer, camera, mask, stages["selected"], stages["cleaned"], output / "preview.png")

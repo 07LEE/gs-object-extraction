@@ -76,9 +76,19 @@ def test_empty_held_out_masks_skip_the_preview_but_finish_the_output(fake_scene,
     monkeypatch.setattr(cli, "preview", lambda *args: drawn.append(args))
     out = tmp_path / "out"
     summary = cli.extract_scene("s", "m", out, band=0)
-    assert drawn == [] and summary["scoring_views"] == 1
-    assert json.loads((out / "summary.json").read_text())["scoring_views"] == 1
+    assert drawn == [] and summary["scoring_views"] == 0 and summary["scores"] is None  # nothing was scored, so no score is made up
+    written = json.loads((out / "summary.json").read_text())
+    assert written["scoring_views"] == 0 and written["scores"] is None
     assert len(load_ply(out / "object.ply").means) == 2
+
+
+def test_a_held_out_view_without_the_object_is_neither_scored_nor_counted(fake_scene, monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "usid_views", lambda scene_dir, model_dir: (fake_scene, [(None, MASK), (None, np.zeros_like(MASK))]))
+    out = tmp_path / "out"
+    summary = cli.extract_scene("s", "m", out, band=0)
+    assert summary["scoring_views"] == 1  # of two held out
+    assert summary["scores"]["selected"] == {"gaussians": 3, "dirt": 1 / 3, "missing": 0.0}  # as with the one view alone
+    assert summary["scores"]["cleaned"] == {"gaussians": 2, "dirt": 0.0, "missing": 0.0}
 
 
 @pytest.mark.parametrize("held", [[], [(None, np.zeros_like(MASK))]], ids=["no held-out views", "empty masks"])
