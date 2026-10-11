@@ -802,7 +802,10 @@ def test_a_click_over_a_marked_view_corrects_that_view_and_space_keeps_it_in_pla
     QTest.keyClick(view, Qt.Key_Space)
     assert len(window.views) == 1 and window.views[0] is not original  # replaced, not added
     assert window.views[0].points == ((100, 80), (150, 100)) and window.views[0].labels == (1, 0)
-    assert window.views[0].camera is original.camera  # it is still the view taken from where it was
+    camera, taken = window.views[0].camera, original.camera  # it is still the view taken from where it was
+    assert (camera.width, camera.height) == (taken.width, taken.height)
+    assert np.allclose([camera.fx, camera.fy, camera.cx, camera.cy], [taken.fx, taken.fy, taken.cx, taken.cy])
+    assert np.allclose(camera.world_to_camera, taken.world_to_camera)
     assert view.kept and view.editing is None and view.points == [(100, 80), (150, 100)]  # the corrected marks stay on screen
     assert not window.add_button.isEnabled() and window.view_list.count() == 1
 
@@ -1041,6 +1044,103 @@ def test_esc_clears_what_was_just_added_from_the_screen_but_not_from_the_views(a
     assert view.points == [(200, 150)] and view.kept
     window.clear_action.trigger()  # Esc
     assert view.points == [] and view.mask is None and not view.kept and len(window.views) == 1
+
+
+def shown_in_overlay(view, world):
+    """Whether the saved-view overlay on screen covers the place on the frame where ``world`` is drawn."""
+    overlay = view.reviewing[1]
+    x, y = where_is(view, world)
+    ix, iy = int((x + .5) / view.camera.width * overlay.width()), int((y + .5) / view.camera.height * overlay.height())
+    return overlay.pixelColor(ix, iy).alpha() > 0
+
+
+def ground_point(camera, x, y):
+    from gs_object_extraction.app.orbit import unproject
+    depth, alpha = GroundRenderer().depth_image(camera)
+    assert alpha[y, x]
+    return unproject(camera, x, y, float(depth[y, x]))
+
+
+def changed_surroundings(window, view, how):
+    """The viewer's up axis or the window's shape is not what a view was saved with."""
+    from gs_object_extraction.app.orbit import AXES
+    if how in ("up", "both"):
+        view.orbit.set_up(AXES["+Z"])
+    if how in ("shape", "both"):
+        window.resize(window.width() + 260, window.height() - 90)
+        QApplication.processEvents()
+
+
+@pytest.mark.parametrize("how", ["up", "shape", "both"])
+def test_a_reviewed_mask_covers_the_same_scene_points_after_the_up_axis_or_the_window_changed(app, how):
+    window, view, fake = ground_window()
+    click(view, 200, 150, Qt.LeftButton)
+    window.add_view()
+    saved = window.views[0]
+    on_mask = ground_point(saved.camera, 200, 150)
+    off_mask = ground_point(saved.camera, 60, 40)
+    assert saved.mask[150, 200] and not saved.mask[40, 60]
+    width = view.width()
+    changed_surroundings(window, view, how)
+    window.review_view(0)
+    view.render_now()
+    assert view.reviewing is not None and view.camera is not saved.camera
+    assert how == "up" or view.width() != width  # the window really is another shape
+    assert shown_in_overlay(view, on_mask) and not shown_in_overlay(view, off_mask)
+
+
+def test_reviewing_in_the_same_up_axis_and_window_draws_the_mask_as_it_was_saved(app):
+    window, view, fake = ground_window()
+    click(view, 200, 150, Qt.LeftButton)
+    window.add_view()
+    window.review_view(0)
+    view.render_now()
+    overlay = view.reviewing[1]
+    assert (overlay.width(), overlay.height()) == (window.views[0].camera.width, window.views[0].camera.height)
+    assert shown_in_overlay(view, ground_point(view.camera, 200, 150))
+
+
+def test_correcting_a_reviewed_view_in_another_window_keeps_the_camera_it_was_corrected_on(app):
+    window, view, fake = ground_window()
+    click(view, 200, 150, Qt.LeftButton)
+    window.add_view()
+    saved = window.views[0]
+    changed_surroundings(window, view, "both")
+    window.review_view(0)
+    view.render_now()
+    assert (view.camera.width, view.camera.height) != (saved.camera.width, saved.camera.height)
+    marks, _ = view._review_marks(saved)
+    assert len(marks) == 1  # the saved click is still on the frame
+    click(view, 80, 60, Qt.LeftButton)
+    assert len(view._anchors) == 2 and view.editing is saved  # its own mark, put where it is on this frame, and the new one
+    assert view.points[0] == (round(marks[0][0]), round(marks[0][1]))
+    window.add_view()
+    corrected = window.views[0]
+    assert corrected is not saved and len(window.views) == 1
+    assert corrected.camera is view.camera and corrected.mask.shape == (view.camera.height, view.camera.width)
+
+
+def test_a_saved_mask_is_carried_along_the_rays_it_was_made_on():
+    from gs_object_extraction.app.orbit import AXES, unproject
+    from gs_object_extraction.app.pick import project
+    from gs_object_extraction.app.viewport import _view_to_frame, _warp_mask
+    saved_orbit = Orbit(np.zeros(3), 5., yaw=.7, pitch=.4, up=AXES["+Y"])
+    frame_orbit = Orbit(np.zeros(3), 5., yaw=.7, pitch=.4, up=AXES["+Y"])
+    frame_orbit.set_up(AXES["+Z"])  # the same eye and direction, rolled about the way it looks
+    assert np.allclose(frame_orbit.eye, saved_orbit.eye)
+    saved, frame = saved_orbit.camera(64, 48), frame_orbit.camera(90, 40)
+    matrix = _view_to_frame(saved, frame)
+    mask = np.zeros((48, 64), bool)
+    mask[12:30, 20:44] = True
+    warped = _warp_mask(mask, matrix, (40, 90))
+    assert warped.shape == (40, 90) and warped.any() and warped.sum() != mask.sum()
+    for x, y, inside in ((32, 20, True), (22, 14, True), (40, 28, True), (5, 5, False), (60, 44, False), (32, 40, False)):
+        px, py, _ = project(frame, unproject(saved, x, y, 3.)[None])
+        u, v = int(round(float(px[0]))), int(round(float(py[0])))
+        homogeneous = matrix @ [x, y, 1.]
+        assert np.allclose(homogeneous[:2] / homogeneous[2], [px[0], py[0]], atol=1e-6)  # a world point and the matrix agree
+        if 0 <= u < 90 and 0 <= v < 40:
+            assert warped[v, u] == inside
 
 
 def fly_window():

@@ -526,7 +526,7 @@ class MainWindow(QMainWindow):
             return
         editing = next((i for i, marked in enumerate(self.views) if marked is view.editing), None)
         if editing is not None:
-            marked = MaskedView(self.views[editing].camera, view.mask.copy(), tuple(view.points), tuple(view.labels))
+            marked = MaskedView(view.camera, view.mask.copy(), tuple(view.points), tuple(view.labels))  # the camera of the frame it was corrected on
             self.invalidate_result()
             old = id(self.views[editing])
             self._unreviewed.discard(old)  # the user has been through it
