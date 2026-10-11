@@ -94,6 +94,20 @@ def test_look_from_keeps_the_camera_and_centres_the_new_target():
     np.testing.assert_allclose(uv, [camera.cx, camera.cy], atol=1e-6)
 
 
+@pytest.mark.parametrize("tilt", [0., .5, 3.])
+def test_look_from_keeps_the_camera_where_the_pitch_limit_would_move_it(tilt):
+    """Looking along the up axis cannot be a pitch of 90 degrees; the camera stays and the centre gives way."""
+    orbit = Orbit(np.zeros(3), 5., up=AXES["+Z"])
+    t = np.deg2rad(tilt)
+    eye = 5. * np.array([np.sin(t), 0., np.cos(t)])  # above the target, tilt degrees off the up axis
+    orbit.look_from(eye, np.zeros(3))
+    np.testing.assert_allclose(orbit.eye, eye, atol=1e-9)
+    camera = orbit.camera(160, 120)  # still a valid camera
+    uv, _ = project(camera, np.zeros(3))
+    reach = camera.fy * np.tan(np.deg2rad(max(1. - tilt, 0.)) + 1e-3)  # the centre is off the point by what the limit took, a degree at most
+    assert np.linalg.norm(uv - [camera.cx, camera.cy]) <= reach + 1e-6
+
+
 def test_unproject_inverts_projection():
     camera = Orbit(np.array([.2, .1, 0.]), 3., yaw=1., pitch=-.2).camera(200, 150)
     point = np.array([.4, -.25, .3])

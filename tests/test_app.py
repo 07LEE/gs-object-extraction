@@ -1120,6 +1120,26 @@ def test_correcting_a_reviewed_view_in_another_window_keeps_the_camera_it_was_co
     assert corrected.camera is view.camera and corrected.mask.shape == (view.camera.height, view.camera.width)
 
 
+def test_a_reviewed_mask_stays_on_its_scene_points_when_the_saved_gaze_runs_along_the_up_axis(app):
+    """The pitch limit used to move the camera a little there, and a mask carried by rotation alone came out a few pixels off."""
+    from gs_object_extraction.camera import Camera
+    from gs_object_extraction.app.views import MaskedView
+    window, view, fake = ground_window()
+    width, height = view.width(), view.height()
+    saved_camera = Camera.look_at((.3, 5., .2), (.3, 0., .2), width, height, 50., up=(0, 0, 1))  # straight down; the viewer's up is -Y
+    top, bottom, left, right = height // 2 - 30, height // 2 + 30, width // 2 - 40, width // 2 + 40
+    mask = np.zeros((height, width), bool)
+    mask[top:bottom, left:right] = True
+    assert view.orbit.up[1] == -1.
+    assert view.show_view(MaskedView(saved_camera, mask, (), ()))
+    view.render_now()
+    assert np.allclose(view.camera.eye, saved_camera.eye, atol=1e-6)  # the viewer stands where the view was taken
+    middle_y, middle_x = (top + bottom) // 2, (left + right) // 2
+    for x, y, inside in ((left + 3, middle_y, True), (right - 4, middle_y, True), (middle_x, top + 3, True), (middle_x, bottom - 4, True),
+                         (left - 4, middle_y, False), (right + 3, middle_y, False), (middle_x, top - 4, False), (middle_x, bottom + 3, False)):
+        assert shown_in_overlay(view, ground_point(saved_camera, x, y)) == inside, (x, y)
+
+
 def test_a_saved_mask_is_carried_along_the_rays_it_was_made_on():
     from gs_object_extraction.app.orbit import AXES, unproject
     from gs_object_extraction.app.pick import project
