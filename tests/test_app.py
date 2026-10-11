@@ -1140,6 +1140,29 @@ def test_a_reviewed_mask_stays_on_its_scene_points_when_the_saved_gaze_runs_alon
         assert shown_in_overlay(view, ground_point(saved_camera, x, y)) == inside, (x, y)
 
 
+def test_a_strip_wise_warp_matches_a_whole_frame_one_and_stays_small():
+    import tracemalloc
+    from gs_object_extraction.app.viewport import _warp_mask
+    mask = np.random.default_rng(3).random((137, 211)) > .5
+    matrix = np.array([[.9, .25, 7.], [-.2, 1.1, 3.], [1e-4, -2e-4, 1.]])
+    shape = (150, 190)  # neither a multiple of a strip
+    ys, xs = np.mgrid[0:150, 0:190]
+    source = np.linalg.inv(matrix) @ np.stack([xs.ravel(), ys.ravel(), np.ones(xs.size)])
+    sx, sy = np.rint(source[0] / source[2]).astype(int), np.rint(source[1] / source[2]).astype(int)
+    inside = (source[2] > 0) & (sx >= 0) & (sx < 211) & (sy >= 0) & (sy < 137)
+    expected = np.zeros(xs.size, bool)
+    expected[inside] = mask[sy[inside], sx[inside]]
+    assert inside.any() and not inside.all()
+    for strip in (1, 7, 64, 500):
+        np.testing.assert_array_equal(_warp_mask(mask, matrix, shape, strip=strip), expected.reshape(shape))
+    big = np.ones((2160, 3840), bool)  # a 4K frame: a whole-frame warp held about 600 MB at once
+    tracemalloc.start()
+    _warp_mask(big, np.eye(3), big.shape)
+    peak = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+    assert peak < 100e6
+
+
 def test_a_saved_mask_is_carried_along_the_rays_it_was_made_on():
     from gs_object_extraction.app.orbit import AXES, unproject
     from gs_object_extraction.app.pick import project

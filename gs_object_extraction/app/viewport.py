@@ -102,17 +102,24 @@ def _stretch(saved, frame):
     return np.array([[sx, 0, (sx - 1) / 2], [0, sy, (sy - 1) / 2], [0, 0, 1.]])
 
 
-def _warp_mask(mask, matrix, shape):
-    """``mask`` seen through ``matrix`` (saved pixel to frame pixel) on a frame of ``shape``; what falls outside the mask's image is empty."""
+def _warp_mask(mask, matrix, shape, strip=64):
+    """``mask`` seen through ``matrix`` (saved pixel to frame pixel) on a frame of ``shape``; what falls outside the mask's image is empty.
+
+    The frame is worked a strip of rows at a time, so the temporaries stay small on a large window.
+    """
     height, width = shape
-    ys, xs = np.mgrid[0:height, 0:width]
-    source = np.linalg.inv(matrix) @ np.stack([xs.ravel(), ys.ravel(), np.ones(xs.size)])
-    with np.errstate(divide="ignore", invalid="ignore"):
-        sx, sy = np.rint(source[0] / source[2]), np.rint(source[1] / source[2])
-    inside = (source[2] > 0) & (sx >= 0) & (sx < mask.shape[1]) & (sy >= 0) & (sy < mask.shape[0])
-    warped = np.zeros(xs.size, bool)
-    warped[inside] = mask[sy[inside].astype(int), sx[inside].astype(int)]
-    return warped.reshape(height, width)
+    (a, b, c), (d, e, f), (g, h, i) = np.linalg.inv(matrix)  # a frame pixel (x, y) came from ((a x + b y + c) / w, (d x + e y + f) / w), w = g x + h y + i
+    xs = np.arange(width, dtype=float)
+    warped = np.zeros((height, width), bool)
+    for top in range(0, height, strip):
+        ys = np.arange(top, min(top + strip, height), dtype=float)[:, None]
+        w = g * xs + h * ys + i
+        with np.errstate(divide="ignore", invalid="ignore"):
+            sx, sy = np.rint((a * xs + b * ys + c) / w), np.rint((d * xs + e * ys + f) / w)
+        inside = (w > 0) & (sx >= 0) & (sx < mask.shape[1]) & (sy >= 0) & (sy < mask.shape[0])
+        rows = warped[top:top + len(ys)]
+        rows[inside] = mask[sy[inside].astype(int), sx[inside].astype(int)]
+    return warped
 
 
 def _icon(draw, size=22):
